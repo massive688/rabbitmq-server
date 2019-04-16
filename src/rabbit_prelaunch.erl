@@ -27,6 +27,8 @@
 -define(ERROR_CODE, 1).
 -define(DO_NOT_SET_DIST_PORT, 2).
 -define(EX_USAGE, 64).
+-define(LOCAL_IPV6_ADDRESS, {0,0,0,0,0,0,0,1}).
+
 
 %%----------------------------------------------------------------------------
 
@@ -70,7 +72,7 @@ config_file_check() ->
 
 %% Check whether a node with the same name is already running
 duplicate_node_check(NodeName, NodeHost) ->
-    case rabbit_nodes:names(NodeHost) of
+    case empd_names(NodeHost) of
         {ok, NamePorts}  ->
             case proplists:is_defined(NodeName, NamePorts) of
                 true -> io:format(
@@ -151,7 +153,8 @@ dist_port_use_check_ipv6(NodeHost, Port) ->
                                          no_return().
 
 dist_port_use_check_fail(Port, Host) ->
-    {ok, Names} = rabbit_nodes:names(Host),
+    io:format("dist_port_use_check_fail port:~p host:~p~n",[Port, Host]),
+    {ok, Names} = empd_names(Host),
     case [N || {N, P} <- Names, P =:= Port] of
         []     -> io:format("ERROR: distribution port ~b in use on ~s "
                             "(by non-Erlang process?)~n", [Port, Host]);
@@ -159,3 +162,17 @@ dist_port_use_check_fail(Port, Host) ->
                             [Port, Name, Host])
     end,
     rabbit_misc:quit(?ERROR_CODE).
+
+empd_names(NodeHost) ->
+   case rabbit_nodes:names(NodeHost) of
+       {error, EpmdReason} ->
+           io:format("ERROR: epmd error for host ~s: ~s. Trying with ipv6~n",
+               [NodeHost, rabbit_misc:format_inet_error(EpmdReason)]),
+            case rabbit_nodes:names(?LOCAL_IPV6_ADDRESS) of
+                {error, EpmdReason} ->   {error, EpmdReason};
+                 V -> V
+             end;
+       V -> V
+   end.
+
+

@@ -27,6 +27,8 @@
 
 -define(SERVER, ?MODULE).
 -define(CHECK_FREQUENCY, 60000).
+-define(LOCAL_IPV6_ADDRESS, {0,0,0,0,0,0,0,1}).
+
 
 %%----------------------------------------------------------------------------
 %% It's possible for epmd to be killed out from underneath us. If that
@@ -49,10 +51,17 @@
 start_link() ->
     gen_server:start_link({local, ?SERVER}, ?MODULE, [], []).
 
+
+epmd_port_please(Mod, Name, Host)->
+  case Mod:port_please(Name, Host) of
+    noport -> erl_epmd:port_please(Name, ?LOCAL_IPV6_ADDRESS);
+    V -> V
+  end.
+
 init([]) ->
     {Me, Host} = rabbit_nodes:parts(node()),
     Mod = net_kernel:epmd_module(),
-    init_handle_port_please(Mod:port_please(Me, Host), Mod, Me, Host).
+    init_handle_port_please(epmd_port_please(Mod, Me, Host), Mod, Me, Host).
 
 init_handle_port_please(noport, Mod, Me, Host) ->
     State = #state{mod = Mod,
@@ -95,9 +104,9 @@ check_epmd(State = #state{mod  = Mod,
                           me   = Me,
                           host = Host,
                           port = Port}) ->
-    Port1 = case Mod:port_please(Me, Host) of
+    Port1 = case epmd_port_please(Mod, Me, Host) of
                 noport ->
-                    rabbit_log:warning("epmd does not know us, re-registering ~s at port ~b~n",
+                    rabbit_log:warning("epmd does not know us, re-registering ~s at port ~p~n",
                                        [Me, Port]),
                     Port;
                 {port, NewPort, _Version} ->

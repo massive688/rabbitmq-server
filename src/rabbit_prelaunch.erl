@@ -166,12 +166,10 @@ dist_port_use_check_fail(Port, Host) ->
 empd_names(NodeHost) ->
    case rabbit_nodes:names(NodeHost) of
        {error, EpmdReason} ->
-           io:format("ERROR: epmd error for host ~s: ~s. Trying with ipv6~n",
+           io:format("ERROR: epmd error for host ~s: ~s, trying with ipv6~n",
                [NodeHost, rabbit_misc:format_inet_error(EpmdReason)]),
-            case rabbit_nodes:names(?LOCAL_IPV6_ADDRESS) of
-                {error, EpmdReason} ->   {error, EpmdReason};
-                 V -> V
-             end;
+           rabbit_nodes:names(?LOCAL_IPV6_ADDRESS);
+
        V -> V
    end.
 

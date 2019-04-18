@@ -27,7 +27,6 @@
 
 -define(SERVER, ?MODULE).
 -define(CHECK_FREQUENCY, 60000).
--define(LOCAL_IPV6_ADDRESS, {0,0,0,0,0,0,0,1}).
 
 
 %%----------------------------------------------------------------------------

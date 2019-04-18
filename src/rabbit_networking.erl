@@ -44,6 +44,8 @@
 
 -export([tcp_listener_started/4, tcp_listener_stopped/4]).
 
+-export([epmd_port_please/3]).
+
 -deprecated([{force_connection_event_refresh, 1, eventually}]).
 
 %% Internal
@@ -53,7 +55,7 @@
 
 %% IANA-suggested ephemeral port range is 49152 to 65535
 -define(FIRST_TEST_BIND_PORT, 49152).
--define(LOCAL_IPV6_ADDRESS, {0,0,0,0,0,0,0,1}).
+-define(LOOPBACK_IPV6_ADDRESS, {0,0,0,0,0,0,0,1}).
 
 
 %%----------------------------------------------------------------------------
@@ -292,11 +294,7 @@ tcp_listener_stopped(Protocol, Opts, IPAddress, Port) ->
                      port = Port,
                      opts = Opts}).
 
-epmd_port_please(Name, Host)->
- case erl_epmd:port_please(Name, Host) of
-   noport -> erl_epmd:port_please(Name, ?LOCAL_IPV6_ADDRESS);
-   V -> V
- end.
+
 
 record_distribution_listener() ->
     {Name, Host} = rabbit_nodes:parts(node()),
@@ -571,3 +569,12 @@ ipv6_status(TestPort) ->
         {error, _} ->
             ipv6_status(TestPort + 1)
     end.
+
+epmd_port_please(Name, Host)->
+  epmd_port_please(erl_epmd, Name, Host).
+
+epmd_port_please(Mod, Name, Host)->
+  case Mod:port_please(Name, Host) of
+    noport -> Mod:port_please(Name, ?LOOPBACK_IPV6_ADDRESS);
+    V -> V
+  end.

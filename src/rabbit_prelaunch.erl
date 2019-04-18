@@ -27,7 +27,7 @@
 -define(ERROR_CODE, 1).
 -define(DO_NOT_SET_DIST_PORT, 2).
 -define(EX_USAGE, 64).
--define(LOCAL_IPV6_ADDRESS, {0,0,0,0,0,0,0,1}).
+-define(LOOPBACK_IPV6_ADDRESS, {0,0,0,0,0,0,0,1}).
 
 
 %%----------------------------------------------------------------------------
@@ -153,7 +153,6 @@ dist_port_use_check_ipv6(NodeHost, Port) ->
                                          no_return().
 
 dist_port_use_check_fail(Port, Host) ->
-    io:format("dist_port_use_check_fail port:~p host:~p~n",[Port, Host]),
     {ok, Names} = empd_names(Host),
     case [N || {N, P} <- Names, P =:= Port] of
         []     -> io:format("ERROR: distribution port ~b in use on ~s "
@@ -163,12 +162,16 @@ dist_port_use_check_fail(Port, Host) ->
     end,
     rabbit_misc:quit(?ERROR_CODE).
 
+%% if the EPMD is listening to [::1]:4369, the call
+%% net_adm:names(localhost). can fail with the error: {error,address}.
+%% in this case we try to use the LOOPBACK_IPV6_ADDRESS to get the names
+%% see: rabbitmq-server/pull/1982 for more detail.
 empd_names(NodeHost) ->
    case rabbit_nodes:names(NodeHost) of
        {error, EpmdReason} ->
-           io:format("ERROR: epmd error for host ~s: ~s, trying with ipv6~n",
+           io:format("ERROR: epmd error for host ~s: ~s, trying with ipv6 loopback~n",
                [NodeHost, rabbit_misc:format_inet_error(EpmdReason)]),
-           rabbit_nodes:names(?LOCAL_IPV6_ADDRESS);
+           rabbit_nodes:names(?LOOPBACK_IPV6_ADDRESS);
 
        V -> V
    end.

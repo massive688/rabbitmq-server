@@ -171,7 +171,8 @@ empd_names(NodeHost) ->
        {error, EpmdReason} ->
            io:format("ERROR: epmd error for host ~s: ~s, trying with ipv6 loopback~n",
                [NodeHost, rabbit_misc:format_inet_error(EpmdReason)]),
-           rabbit_nodes:names(?LOOPBACK_IPV6_ADDRESS);
+           {ok, IPV6} = inet:getaddr(NodeHost, inet6),
+           rabbit_nodes:names(IPV6);
 
        V -> V
    end.

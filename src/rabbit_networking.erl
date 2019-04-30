@@ -55,8 +55,6 @@
 
 %% IANA-suggested ephemeral port range is 49152 to 65535
 -define(FIRST_TEST_BIND_PORT, 49152).
--define(LOOPBACK_IPV6_ADDRESS, {0,0,0,0,0,0,0,1}).
-
 
 %%----------------------------------------------------------------------------
 
@@ -575,6 +573,7 @@ epmd_port_please(Name, Host)->
 
 epmd_port_please(Mod, Name, Host)->
   case Mod:port_please(Name, Host) of
-    noport -> Mod:port_please(Name, ?LOOPBACK_IPV6_ADDRESS);
+    noport -> {ok, IPV6} = inet:getaddr(Host, inet6),
+              Mod:port_please(Name, IPV6);
     V -> V
   end.

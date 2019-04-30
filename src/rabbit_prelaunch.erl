@@ -27,8 +27,6 @@
 -define(ERROR_CODE, 1).
 -define(DO_NOT_SET_DIST_PORT, 2).
 -define(EX_USAGE, 64).
--define(LOOPBACK_IPV6_ADDRESS, {0,0,0,0,0,0,0,1}).
-
 
 %%----------------------------------------------------------------------------
 

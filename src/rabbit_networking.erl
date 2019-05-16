@@ -571,6 +571,12 @@ ipv6_status(TestPort) ->
 epmd_port_please(Name, Host)->
   epmd_port_please(erl_epmd, Name, Host).
 
+
+%% As rabbit_prelaunch:names/2, the call
+%% net_adm:names(localhost). can fail.
+%% So we try to use the loopback ipv6 address to get
+%% the names, using inet:getaddr(NodeHost, inet6) .
+%% see: rabbitmq-server/pull/1982 for more details.
 epmd_port_please(Mod, Name, Host)->
   case Mod:port_please(Name, Host) of
     noport -> {ok, IPV6} = inet:getaddr(Host, inet6),

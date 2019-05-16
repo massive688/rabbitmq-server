@@ -162,8 +162,9 @@ dist_port_use_check_fail(Port, Host) ->
 
 %% if the EPMD is listening to [::1]:4369, the call
 %% net_adm:names(localhost). can fail with the error: {error,address}.
-%% in this case we try to use the LOOPBACK_IPV6_ADDRESS to get the names
-%% see: rabbitmq-server/pull/1982 for more detail.
+%% In this case we try to use the loopback ipv6 address to get
+%% the names, using inet:getaddr(NodeHost, inet6) .
+%% see: rabbitmq-server/pull/1982 for more details.
 empd_names(NodeHost) ->
    case rabbit_nodes:names(NodeHost) of
        {error, EpmdReason} ->

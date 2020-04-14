@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2019 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_mnesia_rename).
@@ -281,4 +281,5 @@ become(BecomeNode) ->
 
 start_distribution(Name) ->
     rabbit_nodes:ensure_epmd(),
-    net_kernel:start([Name, rabbit_nodes:name_type()]).
+    NameType = rabbit_nodes_common:name_type(Name),
+    net_kernel:start([Name, NameType]).

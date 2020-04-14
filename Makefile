@@ -56,6 +56,7 @@ define PROJECT_ENV
 	    {reverse_dns_lookups, false},
 	    {cluster_partition_handling, ignore},
 	    {cluster_keepalive_interval, 10000},
+	    {autoheal_state_transition_timeout, 60000},
 	    {tcp_listen_options, [{backlog,       128},
 	                          {nodelay,       true},
 	                          {linger,        {true, 0}},
@@ -129,15 +130,25 @@ define PROJECT_ENV
 		%% interval at which the channel can perform periodic actions
 	    {channel_tick_interval, 60000},
 	    %% Default max message size is 128 MB
-	    {max_message_size, 134217728}
+	    {max_message_size, 134217728},
+	    %% Socket writer will run GC every 1 GB of outgoing data
+	    {writer_gc_threshold, 1000000000}
 	  ]
 endef
 
-LOCAL_DEPS = sasl mnesia os_mon inets compiler public_key crypto ssl syntax_tools
+# With Erlang.mk default behavior, the value of `$(APPS_DIR)` is always
+# relative to the top-level executed Makefile. In our case, it could be
+# a plugin for instance. However, the rabbitmq_prelaunch application is
+# in this repository, not the plugin's. That's why we need to override
+# this value here.
+APPS_DIR := $(CURDIR)/apps
+
+LOCAL_DEPS = sasl rabbitmq_prelaunch os_mon inets compiler public_key crypto ssl syntax_tools xmerl
 BUILD_DEPS = rabbitmq_cli syslog
-DEPS = ranch lager rabbit_common ra sysmon_handler stdout_formatter recon observer_cli
+DEPS = cuttlefish ranch lager rabbit_common ra sysmon_handler stdout_formatter recon observer_cli
 TEST_DEPS = rabbitmq_ct_helpers rabbitmq_ct_client_helpers amqp_client meck proper
 
+dep_cuttlefish = hex 2.2.0
 dep_syslog = git https://github.com/schlagert/syslog 3.4.5
 
 define usage_xml_to_erl
@@ -164,6 +175,9 @@ ERLANG_MK_COMMIT = rabbitmq-tmp
 include rabbitmq-components.mk
 include erlang.mk
 
+# See above why we mess with `$(APPS_DIR)`.
+unexport APPS_DIR
+
 ifeq ($(strip $(BATS)),)
 BATS := $(ERLANG_MK_TMP)/bats/bin/bats
 endif
@@ -183,29 +197,43 @@ bats: $(BATS)
 tests:: bats
 
 SLOW_CT_SUITES := backing_queue \
+		  channel_interceptor \
+		  cluster \
 		  cluster_rename \
 		  clustering_management \
 		  config_schema \
+		  confirms_rejects \
+		  consumer_timeout \
+		  crashing_queues \
 		  dynamic_ha \
+		  dynamic_qq \
 		  eager_sync \
 		  feature_flags \
 		  health_check \
 		  lazy_queue \
+		  many_node_ha \
 		  metrics \
 		  msg_store \
 		  partitions \
 		  per_user_connection_tracking \
 		  per_vhost_connection_limit \
+		  per_vhost_connection_limit_partitions \
 		  per_vhost_msg_store \
 		  per_vhost_queue_limit \
 		  policy \
 		  priority_queue \
+		  priority_queue_recovery \
+		  publisher_confirms_parallel \
 		  queue_master_location \
+		  queue_parallel \
 		  quorum_queue \
 		  rabbit_core_metrics_gc \
 		  rabbit_fifo_prop \
+		  rabbitmq_queues_cli_integration \
+		  rabbitmqctl_integration \
 		  simple_ha \
 		  sync_detection \
+		  unit_inbroker_non_parallel \
 		  unit_inbroker_parallel \
 		  vhost
 FAST_CT_SUITES := $(filter-out $(sort $(SLOW_CT_SUITES)),$(CT_SUITES))
@@ -239,20 +267,6 @@ ifndef USE_PROPER_QC
 USE_PROPER_QC := $(shell $(ERL) -eval 'io:format({module, proper} =:= code:ensure_loaded(proper)), halt().')
 RMQ_ERLC_OPTS += $(if $(filter true,$(USE_PROPER_QC)),-Duse_proper_qc)
 endif
-
-.PHONY: copy-escripts clean-extra-sources clean-escripts
-
-CLI_ESCRIPTS_DIR = escript
-
-copy-escripts:
-	$(gen_verbose) $(MAKE) -C $(DEPS_DIR)/rabbitmq_cli install \
-		PREFIX="$(abspath $(CLI_ESCRIPTS_DIR))" \
-		DESTDIR=
-
-clean:: clean-escripts
-
-clean-escripts:
-	$(gen_verbose) rm -rf "$(CLI_ESCRIPTS_DIR)"
 
 # --------------------------------------------------------------------
 # Documentation.
@@ -288,6 +302,7 @@ web-manpages: $(WEB_MANPAGES)
 	    gsub(/<\/h1>/, "</h2>", line); \
 	    gsub(/class="D1"/, "class=\"D1 lang-bash\"", line); \
 	    gsub(/class="Bd Bd-indent"/, "class=\"Bd Bd-indent lang-bash\"", line); \
+	    gsub(/&#[xX]201[cCdD];/, "\\&quot;", line); \
 	    print line; \
 	  } } \
 	  ' > "$@"
@@ -296,5 +311,3 @@ distclean:: distclean-manpages
 
 distclean-manpages::
 	$(gen_verbose) rm -f $(WEB_MANPAGES)
-
-app-build: copy-escripts

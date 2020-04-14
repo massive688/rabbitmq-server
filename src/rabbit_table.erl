@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2019 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_table).
@@ -106,12 +106,15 @@ wait(TableNames, Timeout, Retries) ->
                  ok ->
                      ok;
                  {timeout, BadTabs} ->
-                     {error, {timeout_waiting_for_tables, BadTabs}};
+                     AllNodes = rabbit_mnesia:cluster_nodes(all),
+                     {error, {timeout_waiting_for_tables, AllNodes, BadTabs}};
                  {error, Reason} ->
-                     {error, {failed_waiting_for_tables, Reason}}
+                     AllNodes = rabbit_mnesia:cluster_nodes(all),
+                     {error, {failed_waiting_for_tables, AllNodes, Reason}}
              end,
     case {Retries, Result} of
         {_, ok} ->
+            rabbit_log:info("Successfully synced tables from a peer"),
             ok;
         {1, {error, _} = Error} ->
             throw(Error);
@@ -296,10 +299,11 @@ definitions() ->
                                  permission = #permission{_='_'},
                                  _='_'}}]},
      {rabbit_vhost,
-      [{record_name, vhost},
-       {attributes, record_info(fields, vhost)},
+      [
+       {record_name, vhost},
+       {attributes, vhost:fields()},
        {disc_copies, [node()]},
-       {match, #vhost{_='_'}}]},
+       {match, vhost:pattern_match_all()}]},
      {rabbit_listener,
       [{record_name, listener},
        {attributes, record_info(fields, listener)},
@@ -383,9 +387,9 @@ reverse_binding_match() ->
 binding_destination_match() ->
     resource_match('_').
 trie_node_match() ->
-    #trie_node{   exchange_name = exchange_name_match(), _='_'}.
+    #trie_node{exchange_name = exchange_name_match(), _='_'}.
 trie_edge_match() ->
-    #trie_edge{   exchange_name = exchange_name_match(), _='_'}.
+    #trie_edge{exchange_name = exchange_name_match(), _='_'}.
 trie_binding_match() ->
     #trie_binding{exchange_name = exchange_name_match(), _='_'}.
 exchange_name_match() ->

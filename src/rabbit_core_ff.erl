@@ -11,13 +11,14 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2018 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2018-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_core_ff).
 
 -export([quorum_queue_migration/3,
-         implicit_default_bindings_migration/3]).
+         implicit_default_bindings_migration/3,
+         virtual_host_metadata_migration/3]).
 
 -rabbit_feature_flag(
    {quorum_queue,
@@ -33,6 +34,13 @@
                        "being stored in the database",
       stability     => stable,
       migration_fun => {?MODULE, implicit_default_bindings_migration}
+     }}).
+
+-rabbit_feature_flag(
+   {virtual_host_metadata,
+    #{desc          => "Virtual host metadata (description, tags, etc)",
+      stability     => stable,
+      migration_fun => {?MODULE, virtual_host_metadata_migration}
      }}).
 
 %% -------------------------------------------------------------------
@@ -55,8 +63,9 @@ quorum_queue_migration(_FeatureName, _FeatureProps, is_enabled) ->
     mnesia:table_info(rabbit_durable_queue, attributes) =:= Fields.
 
 migrate_to_amqqueue_with_type(FeatureName, [Table | Rest], Fields) ->
-    rabbit_log:info("Feature flag `~s`:   migrating Mnesia table ~s...",
-                    [FeatureName, Table]),
+    rabbit_log_feature_flags:info(
+      "Feature flag `~s`:   migrating Mnesia table ~s...",
+      [FeatureName, Table]),
     Fun = fun(Queue) -> amqqueue:upgrade_to(amqqueue_v2, Queue) end,
     case mnesia:transform_table(Table, Fun, Fields) of
         {atomic, ok}      -> migrate_to_amqqueue_with_type(FeatureName,
@@ -65,8 +74,9 @@ migrate_to_amqqueue_with_type(FeatureName, [Table | Rest], Fields) ->
         {aborted, Reason} -> {error, Reason}
     end;
 migrate_to_amqqueue_with_type(FeatureName, [], _) ->
-    rabbit_log:info("Feature flag `~s`:   Mnesia tables migration done",
-                    [FeatureName]),
+    rabbit_log_feature_flags:info(
+      "Feature flag `~s`:   Mnesia tables migration done",
+      [FeatureName]),
     ok.
 
 %% -------------------------------------------------------------------
@@ -88,10 +98,26 @@ implicit_default_bindings_migration(_Feature_Name, _FeatureProps,
 remove_explicit_default_bindings(_FeatureName, []) ->
     ok;
 remove_explicit_default_bindings(FeatureName, Queues) ->
-    rabbit_log:info("Feature flag `~s`:   deleting explicit "
-                    "default bindings for ~b queues "
-                    "(it may take some time)...",
-                    [FeatureName, length(Queues)]),
+    rabbit_log_feature_flags:info(
+      "Feature flag `~s`:   deleting explicit default bindings "
+      "for ~b queues (it may take some time)...",
+      [FeatureName, length(Queues)]),
     [rabbit_binding:remove_default_exchange_binding_rows_of(Q)
      || Q <- Queues],
     ok.
+
+
+%% -------------------------------------------------------------------
+%% Virtual host metadata.
+%% -------------------------------------------------------------------
+
+virtual_host_metadata_migration(_FeatureName, _FeatureProps, enable) ->
+    Tab = rabbit_vhost,
+    rabbit_table:wait([Tab], _Retry = true),
+    Fun = fun(Row) -> vhost:upgrade_to(vhost_v2, Row) end,
+    case mnesia:transform_table(Tab, Fun, vhost:fields(vhost_v2)) of
+        {atomic, ok}      -> ok;
+        {aborted, Reason} -> {error, Reason}
+    end;
+virtual_host_metadata_migration(_FeatureName, _FeatureProps, is_enabled) ->
+    mnesia:table_info(rabbit_vhost, attributes) =:= vhost:fields(vhost_v2).

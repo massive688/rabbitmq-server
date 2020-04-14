@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2019 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 -module(rabbit_health_check).
 
@@ -58,12 +58,15 @@ node_health_check(list_channels) ->
     end;
 
 node_health_check(list_queues) ->
-    health_check_queues(rabbit_vhost:list());
+    health_check_queues(rabbit_vhost:list_names());
 
 node_health_check(rabbit_node_monitor) ->
     case rabbit_node_monitor:partitions() of
-        L when is_list(L) ->
-            ok
+        [] ->
+            ok;
+        L when is_list(L), length(L) > 0 ->
+            ErrorMsg = io_lib:format("cluster partition in effect: ~p", [L]),
+            {error_string, ErrorMsg}
     end;
 
 node_health_check(alarms) ->

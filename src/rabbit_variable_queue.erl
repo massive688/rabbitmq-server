@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2019 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_variable_queue).
@@ -321,7 +321,7 @@
           mode,
           %% number of reduce_memory_usage executions, once it
           %% reaches a threshold the queue will manually trigger a runtime GC
-	        %% see: maybe_execute_gc/1
+          %% see: maybe_execute_gc/1
           memory_reduction_run_count,
           %% Queue data is grouped by VHost. We need to store it
           %% to work with queue index.
@@ -710,7 +710,7 @@ ack([], State) ->
 ack([SeqId], State) ->
     case remove_pending_ack(true, SeqId, State) of
         {none, _} ->
-            State;
+            {[], State};
         {#msg_status { msg_id        = MsgId,
                        is_persistent = IsPersistent,
                        msg_in_store  = MsgInStore,
@@ -2399,7 +2399,7 @@ ifold(Fun, Acc, Its, State) ->
 maybe_reduce_memory_use(State = #vqstate {memory_reduction_run_count = MRedRunCount,
                                           mode = Mode}) ->
     case MRedRunCount >= ?EXPLICIT_GC_RUN_OP_THRESHOLD(Mode) of
-	true -> State1 = reduce_memory_use(State),
+        true -> State1 = reduce_memory_use(State),
                 State1#vqstate{memory_reduction_run_count =  0};
         false -> State#vqstate{memory_reduction_run_count =  MRedRunCount + 1}
     end.
@@ -2841,12 +2841,12 @@ move_messages_to_vhost_store(Queues) ->
 
     OldStore = run_old_persistent_store(RecoveryRefs, StartFunState),
 
-    VHosts = rabbit_vhost:list(),
+    VHosts = rabbit_vhost:list_names(),
 
     %% New store should not be recovered.
     NewMsgStore = start_new_store(VHosts),
     %% Recovery terms should be started for all vhosts for new store.
-    [{ok, _} = rabbit_recovery_terms:open_table(VHost) || VHost <- VHosts],
+    [ok = rabbit_recovery_terms:open_table(VHost) || VHost <- VHosts],
 
     MigrationBatchSize = application:get_env(rabbit, queue_migration_batch_size,
                                              ?QUEUE_MIGRATION_BATCH_SIZE),

@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2019 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_networking).
@@ -395,7 +395,7 @@ failed_to_recv_proxy_header(Ref, Error) ->
         closed -> "error when receiving proxy header: TCP socket was ~p prematurely";
         _Other -> "error when receiving proxy header: ~p"
     end,
-    rabbit_log:error(Msg, [Error]),
+    rabbit_log:debug(Msg, [Error]),
     % The following call will clean up resources then exit
     _ = ranch:handshake(Ref),
     exit({shutdown, failed_to_recv_proxy_header}).

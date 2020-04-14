@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2018-2019 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2018-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(single_active_consumer_SUITE).
@@ -21,6 +21,8 @@
 -include_lib("amqp_client/include/amqp_client.hrl").
 
 -compile(export_all).
+
+-define(TIMEOUT, 30000).
 
 all() ->
     [
@@ -40,7 +42,8 @@ groups() ->
             all_messages_go_to_one_consumer,
             fallback_to_another_consumer_when_first_one_is_cancelled,
             fallback_to_another_consumer_when_exclusive_consumer_channel_is_cancelled,
-            fallback_to_another_consumer_when_first_one_is_cancelled_manual_acks
+            fallback_to_another_consumer_when_first_one_is_cancelled_manual_acks,
+            basic_get_is_unsupported
             %% amqp_exclusive_consume_fails_on_exclusive_consumer_queue % Exclusive consume not implemented in QQ
         ]}
     ].
@@ -113,8 +116,9 @@ all_messages_go_to_one_consumer(Config) ->
             ?assertEqual(2, maps:size(MessagesPerConsumer)),
             ?assertEqual(MessageCount, maps:get(CTag1, MessagesPerConsumer)),
             ?assertEqual(0, maps:get(CTag2, MessagesPerConsumer))
-    after 1000 ->
-        throw(failed)
+    after ?TIMEOUT ->
+              flush(),
+              throw(failed)
     end,
 
     amqp_connection:close(C),
@@ -168,8 +172,9 @@ fallback_to_another_consumer_when_first_one_is_cancelled(Config) ->
             ?assertEqual(MessageCount div 2, maps:get(FirstActiveConsumer, MessagesPerConsumer)),
             ?assertEqual(MessageCount div 2 - 1, maps:get(SecondActiveConsumer, MessagesPerConsumer)),
             ?assertEqual(1, maps:get(LastActiveConsumer, MessagesPerConsumer))
-    after 1000 ->
-        throw(failed)
+    after ?TIMEOUT ->
+              flush(),
+              throw(failed)
     end,
 
     amqp_connection:close(C),
@@ -267,6 +272,17 @@ fallback_to_another_consumer_when_exclusive_consumer_channel_is_cancelled(Config
     [amqp_connection:close(Conn) || Conn <- [C1, C2, C3, C]],
     ok.
 
+basic_get_is_unsupported(Config) ->
+    {C, Ch} = connection_and_channel(Config),
+    Q = queue_declare(Ch, Config),
+
+    ?assertExit(
+       {{shutdown, {server_initiated_close, 405, _}}, _},
+       amqp_channel:call(Ch, #'basic.get'{queue = Q, no_ack = false})),
+
+    amqp_connection:close(C),
+    ok.
+
 amqp_exclusive_consume_fails_on_exclusive_consumer_queue(Config) ->
     {C, Ch} = connection_and_channel(Config),
     Q = queue_declare(Ch, Config),
@@ -307,9 +323,10 @@ consume({Parent, {MessagesPerConsumer, MessageCount}, CountDown}) ->
             consume({Parent, {MessagesPerConsumer, MessageCount}, CountDown});
         _ ->
             consume({Parent, {MessagesPerConsumer, MessageCount}, CountDown})
-    after 10000 ->
-        Parent ! {consumer_timeout, {MessagesPerConsumer, MessageCount}},
-        exit(consumer_timeout)
+    after ?TIMEOUT ->
+              Parent ! {consumer_timeout, {MessagesPerConsumer, MessageCount}},
+              flush(),
+              exit(consumer_timeout)
     end.
 
 consume_results() ->
@@ -320,8 +337,9 @@ consume_results() ->
             {MessagesPerConsumer, MessageCount};
         _ ->
             consume_results()
-    after 1000 ->
-        throw(failed)
+    after ?TIMEOUT ->
+              flush(),
+              throw(failed)
     end.
 
 wait_for_messages(ExpectedCount) ->
@@ -352,4 +370,13 @@ receive_deliver() ->
             {CTag, DTag}
     after 5000 ->
             exit(deliver_timeout)
+    end.
+
+flush() ->
+    receive
+        Msg ->
+            ct:pal("flushed: ~w~n", [Msg]),
+            flush()
+    after 10 ->
+              ok
     end.

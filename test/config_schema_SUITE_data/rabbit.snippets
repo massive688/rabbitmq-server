@@ -71,6 +71,13 @@ ssl_options.fail_if_no_peer_cert = true",
   "listeners.ssl = none",[{rabbit,[{ssl_listeners,[]}]}],[]},
  {num_acceptors,
   "num_acceptors.ssl = 1",[{rabbit,[{num_ssl_acceptors,1}]}],[]},
+
+ {socket_writer_gc_threshold,
+  "socket_writer.gc_threshold = 999666111", [{rabbit, [{writer_gc_threshold, 999666111}]}],[]},
+
+ {socket_writer_gc_threshold_off,
+  "socket_writer.gc_threshold = off", [{rabbit, [{writer_gc_threshold, undefined}]}],[]},
+
  {default_user_settings,
   "default_user = guest
 default_pass = guest
@@ -566,6 +573,14 @@ credential_validator.regexp = ^abc\\d+",
   [{rabbit,[{log, [{categories, [{connection, [{file, "file_name_connection"}]},
                                  {channel, [{file, "file_name_channel"}]}]}]}]}],
   []},
+
+ {default_worker_pool_size,
+  "default_worker_pool_size = 512",
+  [{rabbit, [
+      {default_worker_pool_size, 512}
+    ]}],
+  []},
+
  {delegate_count,
   "delegate_count = 64",
   [{rabbit, [
@@ -577,6 +592,13 @@ credential_validator.regexp = ^abc\\d+",
    "net_ticktime = 20",
    [{kernel, [
       {net_ticktime, 20}
+     ]}],
+   []},
+
+  {rabbit_consumer_timeout,
+   "consumer_timeout = 20000",
+   [{rabbit, [
+      {consumer_timeout, 20000}
      ]}],
    []},
 
@@ -630,5 +652,47 @@ credential_validator.regexp = ^abc\\d+",
                {cacertfile,"test/config_schema_SUITE_data/certs/cacert.pem"},
                {certfile,"test/config_schema_SUITE_data/certs/cert.pem"},
                {keyfile,"test/config_schema_SUITE_data/certs/key.pem"}]}}]}],
-  []}
+  []},
+
+  %%
+  %% Definitions
+  %%
+
+ {definition_files, "load_definitions = test/definition_import_SUITE_data/case1.json",
+  [{rabbit,
+       [{load_definitions, "test/definition_import_SUITE_data/case1.json"}]}],
+  []},
+
+  %%
+  %% Raft
+  %%
+
+  {raft_segment_max_entries,
+   "raft.segment_max_entries = 65536",
+   [{ra, [
+      {segment_max_entries, 65536}
+     ]}],
+   []},
+
+  {raft_wal_max_size_bytes,
+   "raft.wal_max_size_bytes = 1048576",
+   [{ra, [
+      {wal_max_size_bytes, 1048576}
+     ]}],
+   []},
+
+   {raft_wal_max_batch_size,
+    "raft.wal_max_batch_size = 32768",
+    [{ra, [
+       {wal_max_batch_size, 32768}
+      ]}],
+    []},
+
+    {raft_snapshot_chunk_size,
+     "raft.snapshot_chunk_size = 1000000",
+     [{ra, [
+        {snapshot_chunk_size, 1000000}
+       ]}],
+     []}
+
 ].

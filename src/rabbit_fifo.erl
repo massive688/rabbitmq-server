@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2019 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_fifo).
@@ -22,7 +22,6 @@
 -compile(inline).
 -compile({no_auto_import, [apply/3]}).
 
--include_lib("ra/include/ra.hrl").
 -include("rabbit_fifo.hrl").
 -include_lib("rabbit_common/include/rabbit.hrl").
 
@@ -68,8 +67,8 @@
         ]).
 
 %% command records representing all the protocol actions that are supported
--record(enqueue, {pid :: maybe(pid()),
-                  seq :: maybe(msg_seqno()),
+-record(enqueue, {pid :: option(pid()),
+                  seq :: option(msg_seqno()),
                   msg :: raw_msg()}).
 -record(checkout, {consumer_id :: consumer_id(),
                    spec :: checkout_spec(),
@@ -144,7 +143,16 @@ update_config(Conf, State) ->
                                competing
                        end,
     Cfg = State#?MODULE.cfg,
-    State#?MODULE{cfg = Cfg#cfg{release_cursor_interval = SHI,
+    SHICur = case State#?MODULE.cfg of
+                 #cfg{release_cursor_interval = {_, C}} ->
+                     C;
+                 #cfg{release_cursor_interval = undefined} ->
+                     SHI;
+                 #cfg{release_cursor_interval = C} ->
+                     C
+             end,
+
+    State#?MODULE{cfg = Cfg#cfg{release_cursor_interval = {SHI, SHICur},
                                 dead_letter_handler = DLH,
                                 become_leader_handler = BLH,
                                 max_length = MaxLength,
@@ -257,6 +265,9 @@ apply(Meta, #credit{credit = NewCredit, delivery_count = RemoteDelCnt,
             %% credit for unknown consumer - just ignore
             {State0, ok}
     end;
+apply(_, #checkout{spec = {dequeue, _}},
+      #?MODULE{cfg = #cfg{consumer_strategy = single_active}} = State0) ->
+    {State0, {error, unsupported}};
 apply(#{from := From} = Meta, #checkout{spec = {dequeue, Settlement},
                                         meta = ConsumerMeta,
                                         consumer_id = ConsumerId},
@@ -316,7 +327,7 @@ apply(#{index := RaftIdx}, #purge{},
                                                   messages = #{},
                                                   returns = lqueue:new(),
                                                   msg_bytes_enqueue = 0,
-                                                  prefix_msgs = {[], []},
+                                                  prefix_msgs = {0, [], 0, []},
                                                   low_msg_num = undefined,
                                                   msg_bytes_in_memory = 0,
                                                   msgs_ready_in_memory = 0},
@@ -542,8 +553,9 @@ state_enter(leader, #?MODULE{consumers = Cons,
                              enqueuers = Enqs,
                              waiting_consumers = WaitingConsumers,
                              cfg = #cfg{name = Name,
+                                        resource = Resource,
                                         become_leader_handler = BLH},
-                             prefix_msgs = {[], []}
+                             prefix_msgs = {0, [], 0, []}
                             }) ->
     % return effects to monitor all current consumers and enqueuers
     Pids = lists:usort(maps:keys(Enqs)
@@ -552,17 +564,14 @@ state_enter(leader, #?MODULE{consumers = Cons,
     Mons = [{monitor, process, P} || P <- Pids],
     Nots = [{send_msg, P, leader_change, ra_event} || P <- Pids],
     NodeMons = lists:usort([{monitor, node, node(P)} || P <- Pids]),
-    Effects = Mons ++ Nots ++ NodeMons,
+    FHReservation = [{mod_call, rabbit_quorum_queue, file_handle_leader_reservation, [Resource]}],
+    Effects = Mons ++ Nots ++ NodeMons ++ FHReservation,
     case BLH of
         undefined ->
             Effects;
         {Mod, Fun, Args} ->
             [{mod_call, Mod, Fun, Args ++ [Name]} | Effects]
     end;
-state_enter(recovered, #?MODULE{prefix_msgs = PrefixMsgCounts})
-  when PrefixMsgCounts =/= {[], []} ->
-    %% TODO: remove assertion?
-    exit({rabbit_fifo, unexpected_prefix_msgs, PrefixMsgCounts});
 state_enter(eol, #?MODULE{enqueuers = Enqs,
                           consumers = Custs0,
                           waiting_consumers = WaitingConsumers0}) ->
@@ -571,8 +580,12 @@ state_enter(eol, #?MODULE{enqueuers = Enqs,
                                     #{}, WaitingConsumers0),
     AllConsumers = maps:merge(Custs, WaitingConsumers1),
     [{send_msg, P, eol, ra_event}
-     || P <- maps:keys(maps:merge(Enqs, AllConsumers))];
-state_enter(_, _) ->
+     || P <- maps:keys(maps:merge(Enqs, AllConsumers))] ++
+        [{mod_call, rabbit_quorum_queue, file_handle_release_reservation, []}];
+state_enter(State, #?MODULE{cfg = #cfg{resource = _Resource}}) when State =/= leader ->
+    FHReservation = {mod_call, rabbit_quorum_queue, file_handle_other_reservation, []},
+    [FHReservation];
+ state_enter(_, _) ->
     %% catch all as not handling all states
     [].
 
@@ -589,24 +602,35 @@ tick(_Ts, #?MODULE{cfg = #cfg{name = Name,
                query_consumer_count(State), % Consumers
                EnqueueBytes,
                CheckoutBytes},
-    %% TODO: call a handler that works out if any known nodes need to be
-    %% purged and emit a command effect to append this to the log
     [{mod_call, rabbit_quorum_queue,
-      handle_tick, [QName, Metrics, all_nodes(State)]}, {aux, emit}].
+      handle_tick, [QName, Metrics, all_nodes(State)]}].
 
 -spec overview(state()) -> map().
 overview(#?MODULE{consumers = Cons,
                   enqueuers = Enqs,
                   release_cursors = Cursors,
+                  enqueue_count = EnqCount,
                   msg_bytes_enqueue = EnqueueBytes,
-                  msg_bytes_checkout = CheckoutBytes} = State) ->
+                  msg_bytes_checkout = CheckoutBytes,
+                  cfg = Cfg} = State) ->
+    Conf = #{name => Cfg#cfg.name,
+             resource => Cfg#cfg.resource,
+             release_cursor_interval => Cfg#cfg.release_cursor_interval,
+             dead_lettering_enabled => undefined =/= Cfg#cfg.dead_letter_handler,
+             max_length => Cfg#cfg.max_length,
+             max_bytes => Cfg#cfg.max_bytes,
+             consumer_strategy => Cfg#cfg.consumer_strategy,
+             max_in_memory_length => Cfg#cfg.max_in_memory_length,
+             max_in_memory_bytes => Cfg#cfg.max_in_memory_bytes},
     #{type => ?MODULE,
+      config => Conf,
       num_consumers => maps:size(Cons),
       num_checked_out => num_checked_out(State),
       num_enqueuers => maps:size(Enqs),
       num_ready_messages => messages_ready(State),
       num_messages => messages_total(State),
       num_release_cursors => lqueue:len(Cursors),
+      release_crusor_enqueue_counter => EnqCount,
       enqueue_message_bytes => EnqueueBytes,
       checkout_message_bytes => CheckoutBytes}.
 
@@ -622,24 +646,51 @@ get_checked_out(Cid, From, To, #?MODULE{consumers = Consumers}) ->
             []
     end.
 
+-record(aux_gc, {last_raft_idx = 0 :: ra:index()}).
+-record(aux, {name :: atom(),
+              utilisation :: term(),
+              gc = #aux_gc{} :: #aux_gc{}}).
+
 init_aux(Name) when is_atom(Name) ->
     %% TODO: catch specific exception throw if table already exists
     ok = ra_machine_ets:create_table(rabbit_fifo_usage,
                                      [named_table, set, public,
                                       {write_concurrency, true}]),
     Now = erlang:monotonic_time(micro_seconds),
-    {Name, {inactive, Now, 1, 1.0}}.
+    #aux{name = Name,
+         utilisation = {inactive, Now, 1, 1.0}}.
 
-handle_aux(_, cast, Cmd, {Name, Use0}, Log, _) ->
-    Use = case Cmd of
+handle_aux(_RaState, cast, Cmd, #aux{name = Name,
+                                     utilisation = Use0} = State0,
+           Log, MacState) ->
+    State = case Cmd of
               _ when Cmd == active orelse Cmd == inactive ->
-                  update_use(Use0, Cmd);
-              emit ->
+                  State0#aux{utilisation = update_use(Use0, Cmd)};
+              tick ->
                   true = ets:insert(rabbit_fifo_usage,
                                     {Name, utilisation(Use0)}),
-                  Use0
+                  eval_gc(Log, MacState, State0);
+              eval ->
+                  State0
           end,
-    {no_reply, {Name, Use}, Log}.
+    {no_reply, State, Log}.
+
+eval_gc(Log, #?MODULE{cfg = #cfg{resource = QR}} = MacState,
+        #aux{gc = #aux_gc{last_raft_idx = LastGcIdx} = Gc} = AuxState) ->
+    {Idx, _} = ra_log:last_index_term(Log),
+    {memory, Mem} = erlang:process_info(self(), memory),
+    case messages_total(MacState) of
+        0 when Idx > LastGcIdx andalso
+               Mem > ?GC_MEM_LIMIT_B ->
+            garbage_collect(),
+            {memory, MemAfter} = erlang:process_info(self(), memory),
+            rabbit_log:debug("~s: full GC sweep complete. "
+                            "Process memory reduced from ~.2fMB to ~.2fMB.",
+                            [rabbit_misc:rs(QR), Mem/?MB, MemAfter/?MB]),
+            AuxState#aux{gc = Gc#aux_gc{last_raft_idx = Idx}};
+        _ ->
+            AuxState
+    end.
 
 %%% Queries
 
@@ -757,15 +808,16 @@ usage(Name) when is_atom(Name) ->
 %%% Internal
 
 messages_ready(#?MODULE{messages = M,
-                        prefix_msgs = {PreR, PreM},
+                        prefix_msgs = {RCnt, _R, PCnt, _P},
                         returns = R}) ->
 
-    %% TODO: optimise to avoid length/1 call
-    maps:size(M) + lqueue:len(R) + length(PreR) + length(PreM).
+    %% prefix messages will rarely have anything in them during normal
+    %% operations so length/1 is fine here
+    maps:size(M) + lqueue:len(R) + RCnt + PCnt.
 
 messages_total(#?MODULE{ra_indexes = I,
-                        prefix_msgs = {PreR, PreM}}) ->
-    rabbit_fifo_index:size(I) + length(PreR) + length(PreM).
+                        prefix_msgs = {RCnt, _R, PCnt, _P}}) ->
+    rabbit_fifo_index:size(I) + RCnt + PCnt.
 
 update_use({inactive, _, _, _} = CUInfo, inactive) ->
     CUInfo;
@@ -796,9 +848,9 @@ moving_average(Time, HalfLife, Next, Current) ->
     Next * (1 - Weight) + Current * Weight.
 
 num_checked_out(#?MODULE{consumers = Cons}) ->
-    lists:foldl(fun (#consumer{checked_out = C}, Acc) ->
-                        maps:size(C) + Acc
-                end, 0, maps:values(Cons)).
+    maps:fold(fun (_, #consumer{checked_out = C}, Acc) ->
+                      maps:size(C) + Acc
+              end, 0, Cons).
 
 cancel_consumer(ConsumerId,
                 #?MODULE{cfg = #cfg{consumer_strategy = competing}} = State,
@@ -950,13 +1002,16 @@ drop_head(#?MODULE{ra_indexes = Indexes0} = State0, Effects0) ->
     end.
 
 enqueue(RaftIdx, RawMsg, #?MODULE{messages = Messages,
-                                low_msg_num = LowMsgNum,
-                                next_msg_num = NextMsgNum} = State0) ->
-    Header = #{size => message_size(RawMsg)},
+                                  low_msg_num = LowMsgNum,
+                                  next_msg_num = NextMsgNum} = State0) ->
+    %% the initial header is an integer only - it will get expanded to a map
+    %% when the next required key is added
+    Header = message_size(RawMsg),
     {State1, Msg} =
         case evaluate_memory_limit(Header, State0) of
             true ->
-                {State0, {RaftIdx, {Header, 'empty'}}}; % indexed message with header map
+                % indexed message with header map
+                {State0, {RaftIdx, {Header, 'empty'}}};
             false ->
                 {add_in_memory_counts(Header, State0),
                  {RaftIdx, {Header, RawMsg}}} % indexed message with header map
@@ -976,26 +1031,58 @@ append_to_master_index(RaftIdx,
 
 
 incr_enqueue_count(#?MODULE{enqueue_count = C,
-                            cfg = #cfg{release_cursor_interval = C}} = State0) ->
-    % this will trigger a dehydrated version of the state to be stored
-    % at this raft index for potential future snapshot generation
+                            cfg = #cfg{release_cursor_interval = {_Base, C}}
+                            } = State0) ->
+    %% this will trigger a dehydrated version of the state to be stored
+    %% at this raft index for potential future snapshot generation
+    %% Q: Why don't we just stash the release cursor here?
+    %% A: Because it needs to be the very last thing we do and we
+    %% first needs to run the checkout logic.
     State0#?MODULE{enqueue_count = 0};
+incr_enqueue_count(#?MODULE{cfg = #cfg{release_cursor_interval = C} = Cfg}
+                   = State0)
+  when is_integer(C) ->
+    %% conversion to new release cursor interval format
+    State = State0#?MODULE{cfg = Cfg#cfg{release_cursor_interval = {C, C}}},
+    incr_enqueue_count(State);
 incr_enqueue_count(#?MODULE{enqueue_count = C} = State) ->
     State#?MODULE{enqueue_count = C + 1}.
 
 maybe_store_dehydrated_state(RaftIdx,
-                             #?MODULE{ra_indexes = Indexes,
+                             #?MODULE{cfg =
+                                      #cfg{release_cursor_interval = {Base, _}}
+                                      = Cfg,
+                                      ra_indexes = Indexes,
                                       enqueue_count = 0,
-                                      release_cursors = Cursors} = State) ->
+                                      release_cursors = Cursors0} = State0) ->
     case rabbit_fifo_index:exists(RaftIdx, Indexes) of
         false ->
             %% the incoming enqueue must already have been dropped
-            State;
+            State0;
         true ->
+            Interval = case Base of
+                           0 -> 0;
+                           _ ->
+                               Total = messages_total(State0),
+                               min(max(Total, Base),
+                                   ?RELEASE_CURSOR_EVERY_MAX)
+                       end,
+            State = convert_prefix_msgs(
+                      State0#?MODULE{cfg = Cfg#cfg{release_cursor_interval =
+                                                   {Base, Interval}}}),
             Dehydrated = dehydrate_state(State),
             Cursor = {release_cursor, RaftIdx, Dehydrated},
-            State#?MODULE{release_cursors = lqueue:in(Cursor, Cursors)}
+            Cursors = lqueue:in(Cursor, Cursors0),
+            State#?MODULE{release_cursors = Cursors}
     end;
+maybe_store_dehydrated_state(RaftIdx,
+                             #?MODULE{cfg =
+                                      #cfg{release_cursor_interval = C} = Cfg}
+                                      = State0)
+  when is_integer(C) ->
+    %% convert to new format
+    State = State0#?MODULE{cfg = Cfg#cfg{release_cursor_interval = {C, C}}},
+    maybe_store_dehydrated_state(RaftIdx, State);
 maybe_store_dehydrated_state(_RaftIdx, State) ->
     State.
 
@@ -1043,11 +1130,12 @@ maybe_enqueue(RaftIdx, From, MsgSeqNo, RawMsg, Effects0,
 snd(T) ->
     element(2, T).
 
-return(Meta, ConsumerId, Returned,
+return(#{index := IncomingRaftIdx} = Meta, ConsumerId, Returned,
        Effects0, #?MODULE{service_queue = SQ0} = State0) ->
     {State1, Effects1} = maps:fold(
-                          fun(MsgId, {Tag, _} = Msg, {S0, E0}) when Tag == '$prefix_msg';
-                                                                    Tag == '$empty_msg'->
+                           fun(MsgId, {Tag, _} = Msg, {S0, E0})
+                                 when Tag == '$prefix_msg';
+                                      Tag == '$empty_msg'->
                                   return_one(MsgId, 0, Msg, S0, E0, ConsumerId);
                              (MsgId, {MsgNum, Msg}, {S0, E0}) ->
                                   return_one(MsgId, MsgNum, Msg, S0, E0,
@@ -1057,24 +1145,27 @@ return(Meta, ConsumerId, Returned,
     Con = Con0#consumer{credit = increase_credit(Con0, map_size(Returned))},
     {Cons, SQ, Effects2} = update_or_remove_sub(ConsumerId, Con, Cons0,
                                                 SQ0, Effects1),
-    State = State1#?MODULE{consumers = Cons,
-                           service_queue = SQ},
-    checkout(Meta, State, Effects2).
+    State2 = State1#?MODULE{consumers = Cons,
+                            service_queue = SQ},
+    {State, ok, Effects} = checkout(Meta, State2, Effects2),
+    update_smallest_raft_index(IncomingRaftIdx, State, Effects).
 
 % used to processes messages that are finished
 complete(ConsumerId, Discarded,
          #consumer{checked_out = Checked} = Con0, Effects0,
          #?MODULE{consumers = Cons0, service_queue = SQ0,
                   ra_indexes = Indexes0} = State0) ->
+    %% TODO optimise use of Discarded map here
     MsgRaftIdxs = [RIdx || {_, {RIdx, _}} <- maps:values(Discarded)],
     %% credit_mode = simple_prefetch should automatically top-up credit
     %% as messages are simple_prefetch or otherwise returned
     Con = Con0#consumer{checked_out = maps:without(maps:keys(Discarded), Checked),
-                        credit = increase_credit(Con0, maps:size(Discarded))},
+                        credit = increase_credit(Con0, map_size(Discarded))},
     {Cons, SQ, Effects} = update_or_remove_sub(ConsumerId, Con, Cons0,
                                                SQ0, Effects0),
     Indexes = lists:foldl(fun rabbit_fifo_index:delete/2, Indexes0,
                           MsgRaftIdxs),
+    %% TODO: use maps:fold instead
     State1 = lists:foldl(fun({_, {_, {Header, _}}}, Acc) ->
                                  add_bytes_settle(Header, Acc);
                             ({'$prefix_msg', Header}, Acc) ->
@@ -1105,7 +1196,6 @@ complete_and_checkout(#{index := IncomingRaftIdx} = Meta, MsgIds, ConsumerId,
     {State2, Effects1} = complete(ConsumerId, Discarded, Con0,
                                   Effects0, State0),
     {State, ok, Effects} = checkout(Meta, State2, Effects1),
-    % settle metrics are incremented separately
     update_smallest_raft_index(IncomingRaftIdx, State, Effects).
 
 dead_letter_effects(_Reason, _Discarded,
@@ -1115,10 +1205,26 @@ dead_letter_effects(_Reason, _Discarded,
 dead_letter_effects(Reason, Discarded,
                     #?MODULE{cfg = #cfg{dead_letter_handler = {Mod, Fun, Args}}},
                     Effects) ->
-    DeadLetters = maps:fold(fun(_, {_, {_, {_Header, Msg}}}, Acc) ->
-                                    [{Reason, Msg} | Acc]
-                            end, [], Discarded),
-    [{mod_call, Mod, Fun, Args ++ [DeadLetters]} | Effects].
+    RaftIdxs = maps:fold(
+                    fun (_, {_, {RaftIdx, {_Header, 'empty'}}}, Acc) ->
+                            [RaftIdx | Acc];
+                        (_, _, Acc) ->
+                            Acc
+                    end, [], Discarded),
+    [{log, RaftIdxs,
+      fun (Log) ->
+              Lookup = maps:from_list(lists:zip(RaftIdxs, Log)),
+              DeadLetters = maps:fold(
+                              fun (_, {_, {RaftIdx, {_Header, 'empty'}}}, Acc) ->
+                                      {enqueue, _, _, Msg} = maps:get(RaftIdx, Lookup),
+                                      [{Reason, Msg} | Acc];
+                                  (_, {_, {_, {_Header, Msg}}}, Acc) ->
+                                      [{Reason, Msg} | Acc];
+                                  (_, _, Acc) ->
+                                      Acc
+                              end, [], Discarded),
+              [{mod_call, Mod, Fun, Args ++ [DeadLetters]}]
+      end} | Effects].
 
 cancel_consumer_effects(ConsumerId,
                         #?MODULE{cfg = #cfg{resource = QName}}, Effects) ->
@@ -1135,8 +1241,7 @@ update_smallest_raft_index(IncomingRaftIdx,
             % we can forward release_cursor all the way until
             % the last received command, hooray
             State = State0#?MODULE{release_cursors = lqueue:new()},
-            {State, ok,
-             [{release_cursor, IncomingRaftIdx, State} | Effects]};
+            {State, ok, Effects ++ [{release_cursor, IncomingRaftIdx, State}]};
         _ ->
             Smallest = rabbit_fifo_index:smallest(Indexes),
             case find_next_cursor(Smallest, Cursors0) of
@@ -1147,7 +1252,7 @@ update_smallest_raft_index(IncomingRaftIdx,
                     %% we can emit a release cursor we've passed the smallest
                     %% release cursor available.
                     {State0#?MODULE{release_cursors = Cursors}, ok,
-                     [Cursor | Effects]}
+                     Effects ++ [Cursor]}
             end
     end.
 
@@ -1163,14 +1268,21 @@ find_next_cursor(Smallest, Cursors0, Potential) ->
             {Potential, Cursors0}
     end.
 
+update_header(Key, UpdateFun, Default, Header)
+  when is_integer(Header) ->
+    update_header(Key, UpdateFun, Default, #{size => Header});
+update_header(Key, UpdateFun, Default, Header) ->
+    maps:update_with(Key, UpdateFun, Default, Header).
+
+
 return_one(MsgId, 0, {Tag, Header0},
            #?MODULE{returns = Returns,
                     consumers = Consumers,
                     cfg = #cfg{delivery_limit = DeliveryLimit}} = State0,
-           Effects0, ConsumerId) when Tag == '$prefix_msg'; Tag == '$empty_msg' ->
+           Effects0, ConsumerId)
+  when Tag == '$prefix_msg'; Tag == '$empty_msg' ->
     #consumer{checked_out = Checked} = Con0 = maps:get(ConsumerId, Consumers),
-    Header = maps:update_with(delivery_count, fun (C) -> C+1 end,
-                              1, Header0),
+    Header = update_header(delivery_count, fun (C) -> C+1 end, 1, Header0),
     Msg0 = {Tag, Header},
     case maps:get(delivery_count, Header) of
         DeliveryCount when DeliveryCount > DeliveryLimit ->
@@ -1179,7 +1291,8 @@ return_one(MsgId, 0, {Tag, Header0},
             %% this should not affect the release cursor in any way
             Con = Con0#consumer{checked_out = maps:remove(MsgId, Checked)},
             {Msg, State1} = case Tag of
-                                '$empty_msg' -> {Msg0, State0};
+                                '$empty_msg' ->
+                                    {Msg0, State0};
                                 _ -> case evaluate_memory_limit(Header, State0) of
                                          true ->
                                              {{'$empty_msg', Header}, State0};
@@ -1199,8 +1312,7 @@ return_one(MsgId, MsgNum, {RaftId, {Header0, RawMsg}},
                     cfg = #cfg{delivery_limit = DeliveryLimit}} = State0,
            Effects0, ConsumerId) ->
     #consumer{checked_out = Checked} = Con0 = maps:get(ConsumerId, Consumers),
-    Header = maps:update_with(delivery_count, fun (C) -> C+1 end,
-                              1, Header0),
+    Header = update_header(delivery_count, fun (C) -> C+1 end, 1, Header0),
     Msg0 = {RaftId, {Header, RawMsg}},
     case maps:get(delivery_count, Header) of
         DeliveryCount when DeliveryCount > DeliveryLimit ->
@@ -1212,13 +1324,15 @@ return_one(MsgId, MsgNum, {RaftId, {Header0, RawMsg}},
             Con = Con0#consumer{checked_out = maps:remove(MsgId, Checked)},
             %% this should not affect the release cursor in any way
             {Msg, State1} = case RawMsg of
-                                'empty' -> {Msg0, State0};
-                                _ -> case evaluate_memory_limit(Header, State0) of
-                                         true ->
-                                             {{RaftId, {Header, 'empty'}}, State0};
-                                         false ->
-                                             {Msg0, add_in_memory_counts(Header, State0)}
-                                     end
+                                'empty' ->
+                                    {Msg0, State0};
+                                _ ->
+                                    case evaluate_memory_limit(Header, State0) of
+                                        true ->
+                                            {{RaftId, {Header, 'empty'}}, State0};
+                                        false ->
+                                            {Msg0, add_in_memory_counts(Header, State0)}
+                                    end
                             end,
             {add_bytes_return(
                Header,
@@ -1242,7 +1356,6 @@ return_all(#?MODULE{consumers = Cons} = State0, Effects0, ConsumerId,
                 end, {State, Effects0}, Checked).
 
 %% checkout new messages to consumers
-%% reverses the effects list
 checkout(#{index := Index}, State0, Effects0) ->
     {State1, _Result, Effects1} = checkout0(checkout_one(State0),
                                             Effects0, {#{}, #{}}),
@@ -1253,14 +1366,15 @@ checkout(#{index := Index}, State0, Effects0) ->
             {State, ok, Effects}
     end.
 
-checkout0({success, ConsumerId, MsgId, {RaftIdx, {Header, 'empty'}}, State}, Effects,
-          {SendAcc, LogAcc0}) ->
+checkout0({success, ConsumerId, MsgId, {RaftIdx, {Header, 'empty'}}, State},
+          Effects, {SendAcc, LogAcc0}) ->
     DelMsg = {RaftIdx, {MsgId, Header}},
     LogAcc = maps:update_with(ConsumerId,
                               fun (M) -> [DelMsg | M] end,
                               [DelMsg], LogAcc0),
     checkout0(checkout_one(State), Effects, {SendAcc, LogAcc});
-checkout0({success, ConsumerId, MsgId, Msg, State}, Effects, {SendAcc0, LogAcc}) ->
+checkout0({success, ConsumerId, MsgId, Msg, State}, Effects,
+          {SendAcc0, LogAcc}) ->
     DelMsg = {MsgId, Msg},
     SendAcc = maps:update_with(ConsumerId,
                                fun (M) -> [DelMsg | M] end,
@@ -1269,10 +1383,12 @@ checkout0({success, ConsumerId, MsgId, Msg, State}, Effects, {SendAcc0, LogAcc})
 checkout0({Activity, State0}, Effects0, {SendAcc, LogAcc}) ->
     Effects1 = case Activity of
                    nochange ->
-                       append_send_msg_effects(append_log_effects(Effects0, LogAcc), SendAcc);
+                       append_send_msg_effects(
+                         append_log_effects(Effects0, LogAcc), SendAcc);
                    inactive ->
                        [{aux, inactive}
-                        | append_send_msg_effects(append_log_effects(Effects0, LogAcc), SendAcc)]
+                        | append_send_msg_effects(
+                            append_log_effects(Effects0, LogAcc), SendAcc)]
                end,
     {State0, ok, lists:reverse(Effects1)}.
 
@@ -1281,7 +1397,8 @@ evaluate_limit(Result,
                                    max_bytes = undefined}} = State,
                Effects) ->
     {State, Result, Effects};
-evaluate_limit(Result, State0, Effects0) ->
+evaluate_limit(Result, State00, Effects0) ->
+    State0 = convert_prefix_msgs(State00),
     case is_over_limit(State0) of
         true ->
             {State, Effects} = drop_head(State0, Effects0),
@@ -1290,13 +1407,18 @@ evaluate_limit(Result, State0, Effects0) ->
             {State0, Result, Effects0}
     end.
 
-evaluate_memory_limit(_Header, #?MODULE{cfg = #cfg{max_in_memory_length = undefined,
-                                                   max_in_memory_bytes = undefined}}) ->
+evaluate_memory_limit(_Header,
+                      #?MODULE{cfg = #cfg{max_in_memory_length = undefined,
+                                          max_in_memory_bytes = undefined}}) ->
     false;
-evaluate_memory_limit(#{size := Size}, #?MODULE{cfg = #cfg{max_in_memory_length = MaxLength,
-                                                           max_in_memory_bytes = MaxBytes},
-                                                msg_bytes_in_memory = Bytes,
-                                                msgs_ready_in_memory = Length}) ->
+evaluate_memory_limit(#{size := Size}, State) ->
+    evaluate_memory_limit(Size, State);
+evaluate_memory_limit(Size,
+                      #?MODULE{cfg = #cfg{max_in_memory_length = MaxLength,
+                                          max_in_memory_bytes = MaxBytes},
+                               msg_bytes_in_memory = Bytes,
+                               msgs_ready_in_memory = Length})
+  when is_integer(Size) ->
     (Length >= MaxLength) orelse ((Bytes + Size) > MaxBytes).
 
 append_send_msg_effects(Effects, AccMap) when map_size(AccMap) == 0 ->
@@ -1320,17 +1442,21 @@ append_log_effects(Effects0, AccMap) ->
 %%
 %% When we return it is always done to the current return queue
 %% for both prefix messages and current messages
-take_next_msg(#?MODULE{prefix_msgs = {[{'$empty_msg', _} = Msg | Rem], P}} = State) ->
+take_next_msg(#?MODULE{prefix_msgs = {R, P}} = State) ->
+    %% conversion
+    take_next_msg(State#?MODULE{prefix_msgs = {length(R), R, length(P), P}});
+take_next_msg(#?MODULE{prefix_msgs = {NumR, [{'$empty_msg', _} = Msg | Rem],
+                                      NumP, P}} = State) ->
     %% there are prefix returns, these should be served first
-    {Msg, State#?MODULE{prefix_msgs = {Rem, P}}};
-take_next_msg(#?MODULE{prefix_msgs = {[Header | Rem], P}} = State) ->
+    {Msg, State#?MODULE{prefix_msgs = {NumR-1, Rem, NumP, P}}};
+take_next_msg(#?MODULE{prefix_msgs = {NumR, [Header | Rem], NumP, P}} = State) ->
     %% there are prefix returns, these should be served first
     {{'$prefix_msg', Header},
-     State#?MODULE{prefix_msgs = {Rem, P}}};
+     State#?MODULE{prefix_msgs = {NumR-1, Rem, NumP, P}}};
 take_next_msg(#?MODULE{returns = Returns,
                        low_msg_num = Low0,
                        messages = Messages0,
-                       prefix_msgs = {R, P}} = State) ->
+                       prefix_msgs = {NumR, R, NumP, P}} = State) ->
     %% use peek rather than out there as the most likely case is an empty
     %% queue
     case lqueue:peek(Returns) of
@@ -1360,25 +1486,26 @@ take_next_msg(#?MODULE{returns = Returns,
                 {Header, 'empty'} ->
                     %% There are prefix msgs
                     {{'$empty_msg', Header},
-                     State#?MODULE{prefix_msgs = {R, Rem}}};
+                     State#?MODULE{prefix_msgs = {NumR, R, NumP-1, Rem}}};
                 Header ->
                     {{'$prefix_msg', Header},
-                     State#?MODULE{prefix_msgs = {R, Rem}}}
+                     State#?MODULE{prefix_msgs = {NumR, R, NumP-1, Rem}}}
             end
     end.
 
 send_msg_effect({CTag, CPid}, Msgs) ->
-    {send_msg, CPid, {delivery, CTag, Msgs}, ra_event}.
+    {send_msg, CPid, {delivery, CTag, Msgs}, [local, ra_event]}.
 
 send_log_effect({CTag, CPid}, IdxMsgs) ->
     {RaftIdxs, Data} = lists:unzip(IdxMsgs),
     {log, RaftIdxs,
      fun(Log) ->
-             Msgs = lists:zipwith(fun({enqueue, _, _, Msg}, {MsgId, Header}) ->
+             Msgs = lists:zipwith(fun ({enqueue, _, _, Msg}, {MsgId, Header}) ->
                                           {MsgId, {Header, Msg}}
                                   end, Log, Data),
-             [{send_msg, CPid, {delivery, CTag, Msgs}, ra_event}]
-     end}.
+             [{send_msg, CPid, {delivery, CTag, Msgs}, [local, ra_event]}]
+     end,
+     {local, node(CPid)}}.
 
 reply_log_effect(RaftIdx, MsgId, Header, Ready, From) ->
     {log, [RaftIdx],
@@ -1539,16 +1666,23 @@ maybe_queue_consumer(ConsumerId, #consumer{credit = Credit},
             ServiceQueue0
     end.
 
+convert_prefix_msgs(#?MODULE{prefix_msgs = {R, P}} = State) ->
+    State#?MODULE{prefix_msgs = {length(R), R, length(P), P}};
+convert_prefix_msgs(State) ->
+    State.
 
 %% creates a dehydrated version of the current state to be cached and
 %% potentially used to for a snaphot at a later point
 dehydrate_state(#?MODULE{messages = Messages,
                          consumers = Consumers,
                          returns = Returns,
-                         prefix_msgs = {PrefRet0, PrefMsg0},
+                         low_msg_num = Low,
+                         next_msg_num = Next,
+                         prefix_msgs = {PRCnt, PrefRet0, PPCnt, PrefMsg0},
                          waiting_consumers = Waiting0} = State) ->
+    RCnt = lqueue:len(Returns),
     %% TODO: optimise this function as far as possible
-    PrefRet = lists:foldl(fun ({'$prefix_msg', Header}, Acc) ->
+    PrefRet1 = lists:foldr(fun ({'$prefix_msg', Header}, Acc) ->
                                   [Header | Acc];
                               ({'$empty_msg', _} = Msg, Acc) ->
                                   [Msg | Acc];
@@ -1557,15 +1691,13 @@ dehydrate_state(#?MODULE{messages = Messages,
                               ({_, {_, {Header, _}}}, Acc) ->
                                   [Header | Acc]
                           end,
-                          lists:reverse(PrefRet0),
+                          [],
                           lqueue:to_list(Returns)),
-    PrefMsgs = lists:foldl(fun ({_, {_RaftIdx, {_, 'empty'} = Msg}}, Acc) ->
-                                   [Msg | Acc];
-                               ({_, {_RaftIdx, {Header, _}}}, Acc) ->
-                                   [Header | Acc]
-                           end,
-                           lists:reverse(PrefMsg0),
-                           lists:sort(maps:to_list(Messages))),
+    PrefRet = PrefRet0 ++ PrefRet1,
+    PrefMsgsSuff = dehydrate_messages(Low, Next - 1, Messages, []),
+    %% prefix messages are not populated in normal operation only after
+    %% recovering from a snapshot
+    PrefMsgs = PrefMsg0 ++ PrefMsgsSuff,
     Waiting = [{Cid, dehydrate_consumer(C)} || {Cid, C} <- Waiting0],
     State#?MODULE{messages = #{},
                   ra_indexes = rabbit_fifo_index:empty(),
@@ -1575,9 +1707,21 @@ dehydrate_state(#?MODULE{messages = Messages,
                                                dehydrate_consumer(C)
                                        end, Consumers),
                   returns = lqueue:new(),
-                  prefix_msgs = {lists:reverse(PrefRet),
-                                 lists:reverse(PrefMsgs)},
+                  prefix_msgs = {PRCnt + RCnt, PrefRet,
+                                 PPCnt + maps:size(Messages), PrefMsgs},
                   waiting_consumers = Waiting}.
+
+dehydrate_messages(Low, Next, _Msgs, Acc)
+  when Next < Low  ->
+    Acc;
+dehydrate_messages(Low, Next, Msgs, Acc0)  ->
+    Acc = case maps:get(Next, Msgs) of
+              {_RaftIdx, {_, 'empty'} = Msg} ->
+                  [Msg | Acc0];
+              {_RaftIdx, {Header, _}} ->
+                  [Header | Acc0]
+          end,
+    dehydrate_messages(Low, Next - 1, Msgs, Acc).
 
 dehydrate_consumer(#consumer{checked_out = Checked0} = Con) ->
     Checked = maps:map(fun (_, {'$prefix_msg', _} = M) ->
@@ -1604,7 +1748,7 @@ is_over_limit(#?MODULE{cfg = #cfg{max_length = MaxLength,
 
     messages_ready(State) > MaxLength orelse (BytesEnq > MaxBytes).
 
--spec make_enqueue(maybe(pid()), maybe(msg_seqno()), raw_msg()) -> protocol().
+-spec make_enqueue(option(pid()), option(msg_seqno()), raw_msg()) -> protocol().
 make_enqueue(Pid, Seq, Msg) ->
     #enqueue{pid = Pid, seq = Seq, msg = Msg}.
 -spec make_checkout(consumer_id(),
@@ -1644,48 +1788,81 @@ make_purge_nodes(Nodes) ->
 make_update_config(Config) ->
     #update_config{config = Config}.
 
-add_bytes_enqueue(#{size := Bytes}, #?MODULE{msg_bytes_enqueue = Enqueue} = State) ->
-    State#?MODULE{msg_bytes_enqueue = Enqueue + Bytes}.
+add_bytes_enqueue(Bytes,
+                  #?MODULE{msg_bytes_enqueue = Enqueue} = State)
+ when is_integer(Bytes) ->
+    State#?MODULE{msg_bytes_enqueue = Enqueue + Bytes};
+add_bytes_enqueue(#{size := Bytes}, State) ->
+    add_bytes_enqueue(Bytes, State).
 
-add_bytes_drop(#{size := Bytes}, #?MODULE{msg_bytes_enqueue = Enqueue} = State) ->
-    State#?MODULE{msg_bytes_enqueue = Enqueue - Bytes}.
+add_bytes_drop(Bytes,
+               #?MODULE{msg_bytes_enqueue = Enqueue} = State)
+  when is_integer(Bytes) ->
+    State#?MODULE{msg_bytes_enqueue = Enqueue - Bytes};
+add_bytes_drop(#{size := Bytes}, State) ->
+    add_bytes_drop(Bytes, State).
 
-add_bytes_checkout(#{size := Bytes}, #?MODULE{msg_bytes_checkout = Checkout,
-                               msg_bytes_enqueue = Enqueue } = State) ->
+add_bytes_checkout(Bytes,
+                   #?MODULE{msg_bytes_checkout = Checkout,
+                            msg_bytes_enqueue = Enqueue } = State)
+  when is_integer(Bytes) ->
     State#?MODULE{msg_bytes_checkout = Checkout + Bytes,
-                  msg_bytes_enqueue = Enqueue - Bytes}.
+                  msg_bytes_enqueue = Enqueue - Bytes};
+add_bytes_checkout(#{size := Bytes}, State) ->
+    add_bytes_checkout(Bytes, State).
 
-add_bytes_settle(#{size := Bytes}, #?MODULE{msg_bytes_checkout = Checkout} = State) ->
-    State#?MODULE{msg_bytes_checkout = Checkout - Bytes}.
+add_bytes_settle(Bytes,
+                 #?MODULE{msg_bytes_checkout = Checkout} = State)
+  when is_integer(Bytes) ->
+    State#?MODULE{msg_bytes_checkout = Checkout - Bytes};
+add_bytes_settle(#{size := Bytes}, State) ->
+    add_bytes_settle(Bytes, State).
 
-add_bytes_return(#{size := Bytes}, #?MODULE{msg_bytes_checkout = Checkout,
-                               msg_bytes_enqueue = Enqueue} = State) ->
+add_bytes_return(Bytes,
+                 #?MODULE{msg_bytes_checkout = Checkout,
+                               msg_bytes_enqueue = Enqueue} = State)
+  when is_integer(Bytes) ->
     State#?MODULE{msg_bytes_checkout = Checkout - Bytes,
-                  msg_bytes_enqueue = Enqueue + Bytes}.
+                  msg_bytes_enqueue = Enqueue + Bytes};
+add_bytes_return(#{size := Bytes}, State) ->
+    add_bytes_return(Bytes, State).
 
-add_in_memory_counts(#{size := Bytes}, #?MODULE{msg_bytes_in_memory = InMemoryBytes,
-                                     msgs_ready_in_memory = InMemoryCount} = State) ->
+add_in_memory_counts(Bytes,
+                     #?MODULE{msg_bytes_in_memory = InMemoryBytes,
+                              msgs_ready_in_memory = InMemoryCount} = State)
+  when is_integer(Bytes) ->
     State#?MODULE{msg_bytes_in_memory = InMemoryBytes + Bytes,
-                  msgs_ready_in_memory = InMemoryCount + 1}.
+                  msgs_ready_in_memory = InMemoryCount + 1};
+add_in_memory_counts(#{size := Bytes}, State) ->
+    add_in_memory_counts(Bytes, State).
 
-subtract_in_memory_counts(#{size := Bytes},
+subtract_in_memory_counts(Bytes,
                           #?MODULE{msg_bytes_in_memory = InMemoryBytes,
-                                   msgs_ready_in_memory = InMemoryCount} = State) ->
+                                   msgs_ready_in_memory = InMemoryCount} = State)
+  when is_integer(Bytes) ->
     State#?MODULE{msg_bytes_in_memory = InMemoryBytes - Bytes,
-                  msgs_ready_in_memory = InMemoryCount - 1}.
+                  msgs_ready_in_memory = InMemoryCount - 1};
+subtract_in_memory_counts(#{size := Bytes}, State) ->
+    subtract_in_memory_counts(Bytes, State).
 
 message_size(#basic_message{content = Content}) ->
     #content{payload_fragments_rev = PFR} = Content,
     iolist_size(PFR);
-message_size({'$prefix_msg', #{size := B}}) ->
-    B;
-message_size({'$empty_msg', #{size := B}}) ->
-    B;
+message_size({'$prefix_msg', H}) ->
+    get_size_from_header(H);
+message_size({'$empty_msg', H}) ->
+    get_size_from_header(H);
 message_size(B) when is_binary(B) ->
     byte_size(B);
 message_size(Msg) ->
     %% probably only hit this for testing so ok to use erts_debug
     erts_debug:size(Msg).
+
+get_size_from_header(Size) when is_integer(Size) ->
+    Size;
+get_size_from_header(#{size := B}) ->
+    B.
+
 
 all_nodes(#?MODULE{consumers = Cons0,
                    enqueuers = Enqs0,

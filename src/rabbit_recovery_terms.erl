@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2019 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 %% We use a gen_server simply so that during the terminate/2 call
@@ -193,12 +193,37 @@ code_change(_OldVsn, State, _Extra) ->
 
 %%----------------------------------------------------------------------------
 
+-spec open_table(vhost:name()) -> rabbit_types:ok_or_error(any()).
+
 open_table(VHost) ->
+    open_table(VHost, 10).
+
+-spec open_table(vhost:name(), non_neg_integer()) -> rabbit_types:ok_or_error(any()).
+
+open_table(VHost, RetriesLeft) ->
     VHostDir = rabbit_vhost:msg_store_dir_path(VHost),
     File = filename:join(VHostDir, "recovery.dets"),
-    {ok, _} = dets:open_file(VHost, [{file,      File},
-                                     {ram_file,  true},
-                                     {auto_save, infinity}]).
+    Opts = [{file,      File},
+            {ram_file,  true},
+            {auto_save, infinity}],
+    case dets:open_file(VHost, Opts) of
+        {ok, _}        -> ok;
+        {error, Error} ->
+          case RetriesLeft of
+                0 ->
+                    {error, Error};
+                N when is_integer(N) ->
+                    _ = file:delete(File),
+                    %% Wait before retrying
+                    DelayInMs = 1000,
+                    rabbit_log:warning("Failed to open a recovery terms DETS file at ~p. Will delete it and retry in ~p ms (~p retries left)",
+                                       [File, DelayInMs, RetriesLeft]),
+                    timer:sleep(DelayInMs),
+                    open_table(VHost, RetriesLeft - 1)
+          end
+    end.
+
+-spec flush(vhost:name()) -> rabbit_types:ok_or_error(any()).
 
 flush(VHost) ->
     try
@@ -209,6 +234,8 @@ flush(VHost) ->
                              [VHost]),
             ok
     end.
+
+-spec close_table(vhost:name()) -> rabbit_types:ok_or_error(any()).
 
 close_table(VHost) ->
     try

@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2019 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(clustering_management_SUITE).
@@ -34,7 +34,7 @@ groups() ->
     [
       {unclustered, [], [
           {cluster_size_2, [], [
-              erlang_config
+              classic_config_discovery_node_list
             ]},
           {cluster_size_3, [], [
               join_and_part_cluster,
@@ -56,7 +56,8 @@ groups() ->
               status_with_alarm,
               pid_file_and_await_node_startup,
               await_running_count,
-              start_with_invalid_schema_in_path
+              start_with_invalid_schema_in_path,
+              persistent_cluster_id
             ]},
           {cluster_size_4, [], [
               forget_promotes_offline_slave
@@ -67,7 +68,7 @@ groups() ->
 suite() ->
     [
       %% If a test hangs, no need to wait for 30 minutes.
-      {timetrap, {minutes, 5}}
+      {timetrap, {minutes, 15}}
     ].
 
 %% -------------------------------------------------------------------
@@ -106,7 +107,8 @@ init_per_testcase(Testcase, Config) ->
     TestNumber = rabbit_ct_helpers:testcase_number(Config, ?MODULE, Testcase),
     Config1 = rabbit_ct_helpers:set_config(Config, [
         {rmq_nodename_suffix, Testcase},
-        {tcp_ports_base, {skip_n_nodes, TestNumber * ClusterSize}}
+        {tcp_ports_base, {skip_n_nodes, TestNumber * ClusterSize}},
+        {keep_pid_file_on_exit, true}
       ]),
     rabbit_ct_helpers:run_steps(Config1,
       rabbit_ct_broker_helpers:setup_steps() ++
@@ -119,9 +121,8 @@ end_per_testcase(Testcase, Config) ->
     rabbit_ct_helpers:testcase_finished(Config1, Testcase).
 
 %% -------------------------------------------------------------------
-%% Testcases.
+%% Test cases
 %% -------------------------------------------------------------------
-
 
 start_with_invalid_schema_in_path(Config) ->
     [Rabbit, Hare] = cluster_members(Config),
@@ -136,8 +137,26 @@ start_with_invalid_schema_in_path(Config) ->
         ErrRabbit -> error({unable_to_start_with_bad_schema_in_work_dir, ErrRabbit})
     end.
 
-create_bad_schema(Rabbit, Hare, Config) ->
+persistent_cluster_id(Config) ->
+    case os:getenv("SECONDARY_UMBRELLA") of
+      false ->
+        [Rabbit, Hare] = cluster_members(Config),
+        ClusterIDA1 = rpc:call(Rabbit, rabbit_nodes, persistent_cluster_id, []),
+        ClusterIDB1 = rpc:call(Hare, rabbit_nodes, persistent_cluster_id, []),
+        ?assertEqual(ClusterIDA1, ClusterIDB1),
 
+        rabbit_ct_broker_helpers:restart_node(Config, Rabbit),
+        ClusterIDA2 = rpc:call(Rabbit, rabbit_nodes, persistent_cluster_id, []),
+        rabbit_ct_broker_helpers:restart_node(Config, Hare),
+        ClusterIDB2 = rpc:call(Hare, rabbit_nodes, persistent_cluster_id, []),
+        ?assertEqual(ClusterIDA1, ClusterIDA2),
+        ?assertEqual(ClusterIDA2, ClusterIDB2);
+      _ ->
+        %% skip the test in mixed version mode
+        {skip, "Should not run in mixed version environments"}
+    end.
+
+create_bad_schema(Rabbit, Hare, Config) ->
     {ok, RabbitMnesiaDir} = rpc:call(Rabbit, application, get_env, [mnesia, dir]),
     {ok, HareMnesiaDir} = rpc:call(Hare, application, get_env, [mnesia, dir]),
     %% Make sure we don't use the current dir:
@@ -190,6 +209,11 @@ join_and_part_cluster(Config) ->
 join_cluster_bad_operations(Config) ->
     [Rabbit, Hare, Bunny] = cluster_members(Config),
 
+    UsePrelaunch = rabbit_ct_broker_helpers:rpc(
+                     Config, Hare,
+                     erlang, function_exported,
+                     [rabbit_prelaunch, get_context, 0]),
+
     %% Nonexistent node
     ok = stop_app(Rabbit),
     assert_failure(fun () -> join_cluster(Rabbit, non@existent) end),
@@ -223,8 +247,13 @@ join_cluster_bad_operations(Config) ->
     ok = stop_app(Hare),
     assert_failure(fun () -> start_app(Hare) end),
     ok = start_app(Rabbit),
-    %% The Erlang VM has stopped after previous rabbit app failure
-    ok = rabbit_ct_broker_helpers:start_node(Config, Hare),
+    case UsePrelaunch of
+        true ->
+            ok = start_app(Hare);
+        false ->
+            %% The Erlang VM has stopped after previous rabbit app failure
+            ok = rabbit_ct_broker_helpers:start_node(Config, Hare)
+    end,
     ok.
 
 %% This tests that the nodes in the cluster are notified immediately of a node
@@ -549,7 +578,7 @@ update_cluster_nodes(Config) ->
     assert_not_clustered(Hare),
     assert_clustered([Rabbit, Bunny]).
 
-erlang_config(Config) ->
+classic_config_discovery_node_list(Config) ->
     [Rabbit, Hare] = cluster_members(Config),
 
     ok = stop_app(Hare),
@@ -567,26 +596,6 @@ erlang_config(Config) ->
     assert_cluster_status({[Rabbit, Hare], [Rabbit], [Rabbit, Hare]},
                           [Rabbit, Hare]),
 
-    %% Check having a stop_app'ed node around doesn't break completely.
-    ok = stop_app(Hare),
-    ok = reset(Hare),
-    ok = stop_app(Rabbit),
-    ok = rpc:call(Hare, application, set_env,
-                  [rabbit, cluster_nodes, {[Rabbit], disc}]),
-    ok = start_app(Hare),
-    ok = start_app(Rabbit),
-    assert_not_clustered(Hare),
-    assert_not_clustered(Rabbit),
-
-    %% We get a warning but we start anyway
-    ok = stop_app(Hare),
-    ok = reset(Hare),
-    ok = rpc:call(Hare, application, set_env,
-                  [rabbit, cluster_nodes, {[non@existent], disc}]),
-    ok = start_app(Hare),
-    assert_not_clustered(Hare),
-    assert_not_clustered(Rabbit),
-
     %% List of nodes [node()] is equivalent to {[node()], disk}
     ok = stop_app(Hare),
     ok = reset(Hare),
@@ -595,43 +604,9 @@ erlang_config(Config) ->
     ok = start_app(Hare),
     assert_clustered([Rabbit, Hare]),
 
-    %% If we use an invalid node type, the node fails to start.
-    %% The Erlang VM has stopped after previous rabbit app failure
-    rabbit_ct_broker_helpers:start_node(Config, Hare),
     ok = stop_app(Hare),
     ok = reset(Hare),
-    ok = rpc:call(Hare, application, set_env,
-                  [rabbit, cluster_nodes, {["Mike's computer"], disc}]),
-    %% Rabbit app stops abnormally, node goes down
-    assert_failure(fun () -> start_app(Hare) end),
-    assert_not_clustered(Rabbit),
-
-    %% If we use an invalid node type, the node fails to start.
-    %% The Erlang VM has stopped after previous rabbit app failure
-    rabbit_ct_broker_helpers:start_node(Config, Hare),
-    ok = stop_app(Hare),
-    ok = reset(Hare),
-    ok = rpc:call(Hare, application, set_env,
-                  [rabbit, cluster_nodes, {[Rabbit], blue}]),
-    %% Rabbit app stops abnormally, node goes down
-    assert_failure(fun () -> start_app(Hare) end),
-    assert_not_clustered(Rabbit),
-
     %% If we use an invalid cluster_nodes conf, the node fails to start.
-    %% The Erlang VM has stopped after previous rabbit app failure
-    rabbit_ct_broker_helpers:start_node(Config, Hare),
-    ok = stop_app(Hare),
-    ok = reset(Hare),
-    ok = rpc:call(Hare, application, set_env,
-                  [rabbit, cluster_nodes, true]),
-    %% Rabbit app stops abnormally, node goes down
-    assert_failure(fun () -> start_app(Hare) end),
-    assert_not_clustered(Rabbit),
-
-    %% The Erlang VM has stopped after previous rabbit app failure
-    rabbit_ct_broker_helpers:start_node(Config, Hare),
-    ok = stop_app(Hare),
-    ok = reset(Hare),
     ok = rpc:call(Hare, application, set_env,
                   [rabbit, cluster_nodes, "Yes, please"]),
     assert_failure(fun () -> start_app(Hare) end),
@@ -700,13 +675,14 @@ pid_file_and_await_node_startup(Config) ->
     ok = rabbit_ct_broker_helpers:stop_node(Config, Hare),
     %% starting first node fails - it was not the last node to stop
     {error, _} = rabbit_ct_broker_helpers:start_node(Config, Rabbit),
+    PreviousPid = pid_from_file(RabbitPidFile),
     %% start first node in the background
     spawn_link(fun() ->
         rabbit_ct_broker_helpers:start_node(Config, Rabbit)
     end),
-    Attempts = 10,
-    Timeout = 500,
-    wait_for_pid_file_to_contain_running_process_pid(RabbitPidFile, Attempts, Timeout),
+    Attempts = 200,
+    Timeout = 50,
+    wait_for_pid_file_to_change(RabbitPidFile, PreviousPid, Attempts, Timeout),
     {error, _, _} = rabbit_ct_broker_helpers:rabbitmqctl(Config, Rabbit,
       ["wait", RabbitPidFile]).
 
@@ -754,20 +730,27 @@ await_running_count(Config) ->
 %% Internal utils
 %% ----------------------------------------------------------------------------
 
-wait_for_pid_file_to_contain_running_process_pid(_, 0, _) ->
+wait_for_pid_file_to_change(_, 0, _, _) ->
     error(timeout_waiting_for_pid_file_to_have_running_pid);
-wait_for_pid_file_to_contain_running_process_pid(PidFile, Attempts, Timeout) ->
+wait_for_pid_file_to_change(PidFile, PreviousPid, Attempts, Timeout) ->
     Pid = pid_from_file(PidFile),
-    case rabbit_misc:is_os_process_alive(Pid) of
+    case Pid =/= undefined andalso Pid =/= PreviousPid of
         true  -> ok;
         false ->
             ct:sleep(Timeout),
-            wait_for_pid_file_to_contain_running_process_pid(PidFile, Attempts - 1, Timeout)
+            wait_for_pid_file_to_change(PidFile,
+                                        PreviousPid,
+                                        Attempts - 1,
+                                        Timeout)
     end.
 
 pid_from_file(PidFile) ->
-    {ok, Content} = file:read_file(PidFile),
-    string:strip(binary_to_list(Content), both, $\n).
+    case file:read_file(PidFile) of
+        {ok, Content} ->
+            string:strip(binary_to_list(Content), both, $\n);
+        {error, enoent} ->
+            undefined
+    end.
 
 cluster_members(Config) ->
     rabbit_ct_broker_helpers:get_node_configs(Config, nodename).

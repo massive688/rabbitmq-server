@@ -11,13 +11,14 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2019 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(simple_ha_SUITE).
 
 -include_lib("common_test/include/ct.hrl").
 -include_lib("amqp_client/include/amqp_client.hrl").
+-include_lib("eunit/include/eunit.hrl").
 
 -compile(export_all).
 
@@ -34,20 +35,15 @@ groups() ->
       {cluster_size_2, [], [
           rapid_redeclare,
           declare_synchrony,
-          clean_up_exclusive_queues
+          clean_up_exclusive_queues,
+          clean_up_and_redeclare_exclusive_queues_on_other_nodes
         ]},
       {cluster_size_3, [], [
           consume_survives_stop,
-          consume_survives_sigkill,
           consume_survives_policy,
           auto_resume,
           auto_resume_no_ccn_client,
-          confirms_survive_stop,
-          confirms_survive_sigkill,
-          confirms_survive_policy,
-          rejects_survive_stop,
-          rejects_survive_sigkill,
-          rejects_survive_policy
+          confirms_survive_stop
         ]}
     ].
 
@@ -148,6 +144,43 @@ clean_up_exclusive_queues(Config) ->
     [[],[]] = rabbit_ct_broker_helpers:rpc_all(Config, rabbit_amqqueue, list, []),
     ok.
 
+clean_up_and_redeclare_exclusive_queues_on_other_nodes(Config) ->
+    QueueCount = 10,
+    QueueNames = lists:map(fun(N) ->
+        NBin = erlang:integer_to_binary(N),
+        <<"exclusive-q-", NBin/binary>>
+        end, lists:seq(1, QueueCount)),
+    [A, B] = rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
+    Conn = rabbit_ct_client_helpers:open_unmanaged_connection(Config, A),
+    {ok, Ch} = amqp_connection:open_channel(Conn),
+
+    LocationMinMasters = [
+        {<<"x-queue-master-locator">>, longstr, <<"min-masters">>}
+    ],
+    lists:foreach(fun(QueueName) ->
+            declare_exclusive(Ch, QueueName, LocationMinMasters),
+            subscribe(Ch, QueueName)
+    end, QueueNames),
+
+    ok = rabbit_ct_broker_helpers:kill_node(Config, B),
+
+    Cancels = receive_cancels([]),
+    ?assert(length(Cancels) > 0),
+
+    RemaniningQueues = rabbit_ct_broker_helpers:rpc(Config, A, rabbit_amqqueue, list, []),
+
+    ?assertEqual(length(RemaniningQueues), QueueCount - length(Cancels)),
+
+    lists:foreach(fun(QueueName) ->
+            declare_exclusive(Ch, QueueName, LocationMinMasters),
+            true = rabbit_ct_client_helpers:publish(Ch, QueueName, 1),
+            subscribe(Ch, QueueName)
+    end, QueueNames),
+    Messages = receive_messages([]),
+    ?assertEqual(10, length(Messages)),
+    ok = rabbit_ct_client_helpers:close_connection(Conn).
+
+
 consume_survives_stop(Cf)     -> consume_survives(Cf, fun stop/2,    true).
 consume_survives_sigkill(Cf)  -> consume_survives(Cf, fun sigkill/2, true).
 consume_survives_policy(Cf)   -> consume_survives(Cf, fun policy/2,  true).
@@ -156,12 +189,6 @@ auto_resume_no_ccn_client(Cf) -> consume_survives(Cf, fun sigkill/2, false,
                                                   false).
 
 confirms_survive_stop(Cf)    -> confirms_survive(Cf, fun stop/2).
-confirms_survive_sigkill(Cf) -> confirms_survive(Cf, fun sigkill/2).
-confirms_survive_policy(Cf)  -> confirms_survive(Cf, fun policy/2).
-
-rejects_survive_stop(Cf) -> rejects_survive(Cf, fun stop/2).
-rejects_survive_sigkill(Cf) -> rejects_survive(Cf, fun sigkill/2).
-rejects_survive_policy(Cf) -> rejects_survive(Cf, fun policy/2).
 
 %%----------------------------------------------------------------------------
 
@@ -220,38 +247,6 @@ confirms_survive(Config, DeathFun) ->
     rabbit_ha_test_producer:await_response(ProducerPid),
     ok.
 
-rejects_survive(Config, DeathFun) ->
-    [A, B, _] = rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
-    Msgs = rabbit_ct_helpers:cover_work_factor(Config, 20000),
-    Node1Channel = rabbit_ct_client_helpers:open_channel(Config, A),
-    Node2Channel = rabbit_ct_client_helpers:open_channel(Config, B),
-
-    %% declare the queue on the master, mirrored to the two slaves
-    Queue = <<"test_rejects">>,
-    amqp_channel:call(Node1Channel,#'queue.declare'{queue       = Queue,
-                                                    auto_delete = false,
-                                                    durable     = true,
-                                                    arguments = [{<<"x-max-length">>, long, 1},
-                                                                 {<<"x-overflow">>, longstr, <<"reject-publish">>}]}),
-    Payload = <<"there can be only one">>,
-    amqp_channel:call(Node1Channel,
-                      #'basic.publish'{routing_key = Queue},
-                      #amqp_msg{payload = Payload}),
-
-    %% send a bunch of messages from the producer. Tolerating nacks.
-    ProducerPid = rabbit_ha_test_producer:create(Node2Channel, Queue,
-                                                 self(), true, Msgs, nacks),
-    DeathFun(Config, A),
-    rabbit_ha_test_producer:await_response(ProducerPid),
-
-    {#'basic.get_ok'{}, #amqp_msg{payload = Payload}} =
-        amqp_channel:call(Node2Channel, #'basic.get'{queue = Queue}),
-    %% There is only one message.
-    #'basic.get_empty'{} = amqp_channel:call(Node2Channel, #'basic.get'{queue = Queue}),
-    ok.
-
-
-
 stop(Config, Node) ->
     rabbit_ct_broker_helpers:stop_node_after(Config, Node, 50).
 
@@ -273,3 +268,32 @@ open_incapable_channel(NodePort) ->
                                                    client_properties = Props}),
     {ok, Ch} = amqp_connection:open_channel(ConsConn),
     Ch.
+
+declare_exclusive(Ch, QueueName, Args) ->
+    Declare = #'queue.declare'{queue = QueueName,
+        exclusive = true,
+        arguments = Args
+    },
+    #'queue.declare_ok'{} = amqp_channel:call(Ch, Declare).
+
+subscribe(Ch, QueueName) ->
+    ConsumeOk  = amqp_channel:call(Ch, #'basic.consume'{queue = QueueName,
+                                                        no_ack = true}),
+    #'basic.consume_ok'{} = ConsumeOk,
+    receive ConsumeOk -> ok after ?DELAY -> throw(consume_ok_timeout) end.
+
+receive_cancels(Cancels) ->
+    receive
+        #'basic.cancel'{} = C ->
+            receive_cancels([C|Cancels])
+    after ?DELAY ->
+        Cancels
+    end.
+
+receive_messages(All) ->
+    receive
+        {#'basic.deliver'{}, Msg} ->
+            receive_messages([Msg|All])
+    after ?DELAY ->
+        lists:reverse(All)
+    end.

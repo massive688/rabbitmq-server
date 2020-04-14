@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2018-2019 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2018-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -include("amqqueue_v1.hrl").
@@ -51,29 +51,29 @@
          (?is_amqqueue_v1(Q) andalso
           ?amqqueue_v1_field_state(Q) =:= State))).
 
--define(amqqueue_v1_type, classic).
+-define(amqqueue_v1_type, rabbit_classic_queue).
 
 -define(amqqueue_is_classic(Q),
         ((?is_amqqueue_v2(Q) andalso
-          ?amqqueue_v2_field_type(Q) =:= classic) orelse
+          ?amqqueue_v2_field_type(Q) =:= rabbit_classic_queue) orelse
          ?is_amqqueue_v1(Q))).
 
 -define(amqqueue_is_quorum(Q),
         (?is_amqqueue_v2(Q) andalso
-         ?amqqueue_v2_field_type(Q) =:= quorum) orelse
+         ?amqqueue_v2_field_type(Q) =:= rabbit_quorum_queue) orelse
         false).
 
 -define(amqqueue_has_valid_pid(Q),
         ((?is_amqqueue_v2(Q) andalso
-         is_pid(?amqqueue_v2_field_pid(Q))) orelse
-        (?is_amqqueue_v1(Q) andalso
-         is_pid(?amqqueue_v1_field_pid(Q))))).
+          is_pid(?amqqueue_v2_field_pid(Q))) orelse
+         (?is_amqqueue_v1(Q) andalso
+          is_pid(?amqqueue_v1_field_pid(Q))))).
 
 -define(amqqueue_pid_runs_on_local_node(Q),
         ((?is_amqqueue_v2(Q) andalso
-         node(?amqqueue_v2_field_pid(Q)) =:= node()) orelse
-        (?is_amqqueue_v1(Q) andalso
-         node(?amqqueue_v1_field_pid(Q)) =:= node()))).
+          node(?amqqueue_v2_field_pid(Q)) =:= node()) orelse
+         (?is_amqqueue_v1(Q) andalso
+          node(?amqqueue_v1_field_pid(Q)) =:= node()))).
 
 -define(amqqueue_pid_equals(Q, Pid),
         ((?is_amqqueue_v2(Q) andalso
@@ -108,9 +108,9 @@
 
 -define(amqqueue_vhost_equals(Q, VHost),
         ((?is_amqqueue_v2(Q) andalso
-         ?amqqueue_v2_vhost(Q) =:= VHost) orelse
-        (?is_amqqueue_v1(Q) andalso
-         ?amqqueue_v1_vhost(Q) =:= VHost))).
+          ?amqqueue_v2_vhost(Q) =:= VHost) orelse
+         (?is_amqqueue_v1(Q) andalso
+          ?amqqueue_v1_vhost(Q) =:= VHost))).
 
 -ifdef(DEBUG_QUORUM_QUEUE_FF).
 -define(enable_quorum_queue_if_debug,

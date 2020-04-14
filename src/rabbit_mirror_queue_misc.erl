@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2010-2019 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2010-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_mirror_queue_misc).
@@ -27,6 +27,8 @@
 -export([stop_all_slaves/5]).
 
 -export([sync_queue/1, cancel_sync_queue/1]).
+
+-export([transfer_leadership/2, queue_length/1, get_replicas/1]).
 
 %% for testing only
 -export([module/1]).
@@ -241,11 +243,21 @@ add_mirror(QName, MirrorNode, SyncMode) ->
                     #resource{virtual_host = VHost} = amqqueue:get_name(Q),
                     case rabbit_vhost_sup_sup:get_vhost_sup(VHost, MirrorNode) of
                         {ok, _} ->
-                            SPid = rabbit_amqqueue_sup_sup:start_queue_process(
+                            try 
+                                SPid = rabbit_amqqueue_sup_sup:start_queue_process(
                                        MirrorNode, Q, slave),
-                            log_info(QName, "Adding mirror on node ~p: ~p~n",
+                                log_info(QName, "Adding mirror on node ~p: ~p~n",
                                      [MirrorNode, SPid]),
-                            rabbit_mirror_queue_slave:go(SPid, SyncMode);
+                                rabbit_mirror_queue_slave:go(SPid, SyncMode)
+                            of 
+                                _ -> ok
+                            catch
+                                error:QError -> 
+                                    log_warning(QName,
+                                        "Unable to start queue mirror on node '~p'. "
+                                        "Target queue supervisor is not running: ~p~n",
+                                        [MirrorNode, QError])
+                            end;
                         {error, Error} ->
                             log_warning(QName,
                                         "Unable to start queue mirror on node '~p'. "
@@ -534,6 +546,46 @@ update_mirrors(Q) when ?is_amqqueue(Q) ->
     %% a policy requiring auto-sync.
     maybe_auto_sync(Q),
     ok.
+
+queue_length(Q) ->
+    [{messages, M}] = rabbit_amqqueue:info(Q, [messages]),
+    M.
+
+get_replicas(Q) ->
+    {MNode, SNodes} = suggested_queue_nodes(Q),
+    [MNode] ++ SNodes.
+
+transfer_leadership(Q, Destination) ->
+    QName = amqqueue:get_name(Q),
+    {OldMNode, OldSNodes, _} = actual_queue_nodes(Q),
+    OldNodes = [OldMNode | OldSNodes],
+    add_mirrors(QName, [Destination] -- OldNodes, async),
+    drop_mirrors(QName, OldNodes -- [Destination]),
+    {Result, NewQ} = wait_for_new_master(QName, Destination),
+    update_mirrors(NewQ),
+    Result.
+
+wait_for_new_master(QName, Destination) ->
+    wait_for_new_master(QName, Destination, 100).
+
+wait_for_new_master(QName, _, 0) ->
+    {ok, Q} = rabbit_amqqueue:lookup(QName),
+    {{not_migrated, ""}, Q};
+wait_for_new_master(QName, Destination, N) ->
+    {ok, Q} = rabbit_amqqueue:lookup(QName),
+    case amqqueue:get_pid(Q) of
+        none ->
+            timer:sleep(100),
+            wait_for_new_master(QName, Destination, N - 1);
+        Pid ->
+            case node(Pid) of
+                Destination ->
+                    {{migrated, Destination}, Q};
+                _ ->
+                    timer:sleep(100),
+                    wait_for_new_master(QName, Destination, N - 1)
+            end
+    end.
 
 %% The arrival of a newly synced slave may cause the master to die if
 %% the policy does not want the master but it has been kept alive

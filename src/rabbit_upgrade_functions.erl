@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2019 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_upgrade_functions).
@@ -181,7 +181,7 @@ exchange_event_serial() ->
 trace_exchanges() ->
     [declare_exchange(
        rabbit_misc:r(VHost, exchange, <<"amq.rabbitmq.trace">>), topic) ||
-        VHost <- rabbit_vhost:list()],
+        VHost <- rabbit_vhost:list_names()],
     ok.
 
 -spec user_admin_to_tags() -> 'ok'.

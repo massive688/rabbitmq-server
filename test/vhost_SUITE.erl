@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2011-2019 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2011-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(vhost_SUITE).
@@ -34,17 +34,14 @@ groups() ->
     ClusterSize1Tests = [
         single_node_vhost_deletion_forces_connection_closure,
         vhost_failure_forces_connection_closure,
-        dead_vhost_connection_refused,
         vhost_creation_idempotency
     ],
     ClusterSize2Tests = [
         cluster_vhost_deletion_forces_connection_closure,
         vhost_failure_forces_connection_closure,
-        dead_vhost_connection_refused,
         vhost_failure_forces_connection_closure_on_failure_node,
-        dead_vhost_connection_refused_on_failure_node,
         node_starts_with_dead_vhosts,
-        node_starts_with_dead_vhosts_and_ignore_slaves,
+        node_starts_with_dead_vhosts_with_mirrors,
         vhost_creation_idempotency
     ],
     [
@@ -186,27 +183,6 @@ vhost_failure_forces_connection_closure(Config) ->
     close_connections([Conn1]),
     ?assertEqual(0, count_connections_in(Config, VHost1)).
 
-dead_vhost_connection_refused(Config) ->
-    VHost1 = <<"vhost1">>,
-    VHost2 = <<"vhost2">>,
-
-    set_up_vhost(Config, VHost1),
-    set_up_vhost(Config, VHost2),
-
-    ?assertEqual(0, count_connections_in(Config, VHost1)),
-    ?assertEqual(0, count_connections_in(Config, VHost2)),
-
-    rabbit_ct_broker_helpers:force_vhost_failure(Config, VHost2),
-    timer:sleep(200),
-
-    [_Conn1] = open_connections(Config, [{0, VHost1}]),
-    ?assertEqual(1, count_connections_in(Config, VHost1)),
-
-    [_Conn2] = open_connections(Config, [{0, VHost2}]),
-    ?assertEqual(0, count_connections_in(Config, VHost2)),
-
-    expect_that_client_connection_is_rejected(Config, 0, VHost2).
-
 
 vhost_failure_forces_connection_closure_on_failure_node(Config) ->
     VHost1 = <<"vhost1">>,
@@ -235,36 +211,6 @@ vhost_failure_forces_connection_closure_on_failure_node(Config) ->
     close_connections([Conn1]),
     ?assertEqual(0, count_connections_in(Config, VHost1)).
 
-dead_vhost_connection_refused_on_failure_node(Config) ->
-    VHost1 = <<"vhost1">>,
-    VHost2 = <<"vhost2">>,
-
-    set_up_vhost(Config, VHost1),
-    set_up_vhost(Config, VHost2),
-
-    ?assertEqual(0, count_connections_in(Config, VHost1)),
-    ?assertEqual(0, count_connections_in(Config, VHost2)),
-
-    rabbit_ct_broker_helpers:force_vhost_failure(Config, 0, VHost2),
-    timer:sleep(200),
-    %% Can open connections to vhost1 on node 0 and 1
-    [_Conn10] = open_connections(Config, [{0, VHost1}]),
-    ?assertEqual(1, count_connections_in(Config, VHost1)),
-    [_Conn11] = open_connections(Config, [{1, VHost1}]),
-    ?assertEqual(2, count_connections_in(Config, VHost1)),
-
-    %% Connection on vhost2 on node 0 is refused
-    [_Conn20] = open_connections(Config, [{0, VHost2}]),
-    ?assertEqual(0, count_connections_in(Config, VHost2)),
-
-    expect_that_client_connection_is_rejected(Config, 0, VHost2),
-
-    %% Can open connections to vhost2 on node 1
-    [_Conn21] = open_connections(Config, [{1, VHost2}]),
-    ?assertEqual(1, count_connections_in(Config, VHost2)),
-
-    rabbit_ct_broker_helpers:delete_vhost(Config, VHost2),
-    rabbit_ct_broker_helpers:delete_vhost(Config, VHost1).
 
 cluster_vhost_deletion_forces_connection_closure(Config) ->
     VHost1 = <<"vhost1">>,
@@ -313,14 +259,12 @@ node_starts_with_dead_vhosts(Config) ->
     %% The node should start without a vhost
     ok = rabbit_ct_broker_helpers:start_node(Config, 1),
 
-    timer:sleep(500),
+    timer:sleep(3000),
 
-    false = rabbit_ct_broker_helpers:rpc(Config, 1,
-                rabbit_vhost_sup_sup, is_vhost_alive, [VHost1]),
-    true = rabbit_ct_broker_helpers:rpc(Config, 1,
-                rabbit_vhost_sup_sup, is_vhost_alive, [VHost2]).
+    ?assertEqual(true, rabbit_ct_broker_helpers:rpc(Config, 1,
+                        rabbit_vhost_sup_sup, is_vhost_alive, [VHost2])).
 
-node_starts_with_dead_vhosts_and_ignore_slaves(Config) ->
+node_starts_with_dead_vhosts_with_mirrors(Config) ->
     VHost1 = <<"vhost1">>,
     VHost2 = <<"vhost2">>,
 
@@ -331,19 +275,21 @@ node_starts_with_dead_vhosts_and_ignore_slaves(Config) ->
                 rabbit_vhost_sup_sup, is_vhost_alive, [VHost1]),
     true = rabbit_ct_broker_helpers:rpc(Config, 1,
                 rabbit_vhost_sup_sup, is_vhost_alive, [VHost2]),
+    [] = rabbit_ct_broker_helpers:rpc(Config, 1,
+                rabbit_vhost_sup_sup, check, []),
 
     Conn = rabbit_ct_client_helpers:open_unmanaged_connection(Config, 0, VHost1),
     {ok, Chan} = amqp_connection:open_channel(Conn),
 
-    QName = <<"node_starts_with_dead_vhosts_and_ignore_slaves-q-0">>,
+    QName = <<"node_starts_with_dead_vhosts_with_mirrors-q-0">>,
     amqp_channel:call(Chan, #'queue.declare'{queue = QName, durable = true}),
     ok = rabbit_ct_broker_helpers:rpc(Config, 0,
              rabbit_policy, set,
              [VHost1, <<"mirror">>, <<".*">>, [{<<"ha-mode">>, <<"all">>}],
               0, <<"queues">>, <<"acting-user">>]),
 
-    %% Wait for the queue to create a slave
-    timer:sleep(300),
+    %% Wait for the queue to start a mirror
+    timer:sleep(500),
 
     rabbit_ct_client_helpers:publish(Chan, QName, 10),
 
@@ -368,12 +314,10 @@ node_starts_with_dead_vhosts_and_ignore_slaves(Config) ->
     %% The node should start without a vhost
     ok = rabbit_ct_broker_helpers:start_node(Config, 1),
 
-    timer:sleep(500),
+    timer:sleep(3000),
 
-    false = rabbit_ct_broker_helpers:rpc(Config, 1,
-                rabbit_vhost_sup_sup, is_vhost_alive, [VHost1]),
-    true = rabbit_ct_broker_helpers:rpc(Config, 1,
-                rabbit_vhost_sup_sup, is_vhost_alive, [VHost2]).
+    ?assertEqual(true, rabbit_ct_broker_helpers:rpc(Config, 1,
+                        rabbit_vhost_sup_sup, is_vhost_alive, [VHost2])).
 
 vhost_creation_idempotency(Config) ->
     VHost = <<"idempotency-test">>,

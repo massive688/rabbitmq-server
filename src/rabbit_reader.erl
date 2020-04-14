@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2019 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_reader).
@@ -65,8 +65,6 @@
 -export([init/3, mainloop/4, recvloop/4]).
 
 -export([conserve_resources/3, server_properties/1]).
-
--deprecated([{force_event_refresh, 2, eventually}]).
 
 -define(NORMAL_TIMEOUT, 3).
 -define(CLOSING_TIMEOUT, 30).
@@ -220,6 +218,9 @@ info(Pid, Items) ->
 
 -spec force_event_refresh(pid(), reference()) -> 'ok'.
 
+% Note: https://www.pivotaltracker.com/story/show/166962656
+% This event is necessary for the stats timer to be initialized with
+% the correct values once the management agent has started
 force_event_refresh(Pid, Ref) ->
     gen_server:cast(Pid, {force_event_refresh, Ref}).
 
@@ -662,7 +663,7 @@ switch_callback(State, Callback, Length) ->
 terminate(Explanation, State) when ?IS_RUNNING(State) ->
     {normal, handle_exception(State, 0,
                               rabbit_misc:amqp_error(
-                                connection_forced, Explanation, [], none))};
+                                connection_forced, "~s", [Explanation], none))};
 terminate(_Explanation, State) ->
     {force, State}.
 
@@ -924,7 +925,6 @@ create_channel(Channel,
         rabbit_channel_sup_sup:start_channel(
           ChanSupSup, {tcp, Sock, Channel, FrameMax, self(), Name,
                        Protocol, User, VHost, Capabilities, Collector}),
-    _ = rabbit_channel:source(ChPid, ?MODULE),
     MRef = erlang:monitor(process, ChPid),
     put({ch_pid, ChPid}, {Channel, MRef}),
     put({channel, Channel}, {ChPid, AState}),
@@ -1139,9 +1139,8 @@ handle_method0(MethodName, FieldsBin,
             throw({connection_closed_abruptly, State});
           exit:#amqp_error{method = none} = Reason ->
             handle_exception(State, 0, Reason#amqp_error{method = MethodName});
-          Type:Reason ->
-            Stack = erlang:get_stacktrace(),
-            handle_exception(State, 0, {Type, Reason, MethodName, Stack})
+          Type:Reason:Stacktrace ->
+            handle_exception(State, 0, {Type, Reason, MethodName, Stacktrace})
     end.
 
 handle_method0(#'connection.start_ok'{mechanism = Mechanism,
@@ -1229,7 +1228,7 @@ handle_method0(#'connection.open'{virtual_host = VHost},
                            throttle         = Throttle}) ->
 
     ok = is_over_connection_limit(VHost, User),
-    ok = rabbit_access_control:check_vhost_access(User, VHost, {socket, Sock}),
+    ok = rabbit_access_control:check_vhost_access(User, VHost, {socket, Sock}, #{}),
     ok = is_vhost_alive(VHost, User),
     NewConnection = Connection#connection{vhost = VHost},
     ok = send_on_channel0(Sock, #'connection.open_ok'{}, Protocol),
@@ -1273,6 +1272,44 @@ handle_method0(#'connection.close_ok'{},
                State = #v1{connection_state = closed}) ->
     self() ! terminate_connection,
     State;
+handle_method0(#'connection.update_secret'{new_secret = NewSecret, reason = Reason},
+               State = #v1{connection =
+                               #connection{protocol   = Protocol,
+                                           user       = User = #user{username = Username},
+                                           log_name   = ConnName} = Conn,
+                           sock       = Sock}) when ?IS_RUNNING(State) ->
+    rabbit_log_connection:debug(
+        "connection ~p (~s) of user '~s': "
+        "asked to update secret, reason: ~s~n",
+        [self(), dynamic_connection_name(ConnName), Username, Reason]),
+    case rabbit_access_control:update_state(User, NewSecret) of
+      {ok, User1} ->
+        %% User/auth backend state has been updated. Now we can propagate it to channels
+        %% asynchronously and return. All the channels have to do is to update their
+        %% own state.
+        %%
+        %% Any secret update errors coming from the authz backend will be handled in the other branch.
+        %% Therefore we optimistically do no error handling here. MK.
+        lists:foreach(fun(Ch) ->
+          rabbit_log:debug("Updating user/auth backend state for channel ~p", [Ch]),
+          _ = rabbit_channel:update_user_state(Ch, User1)
+        end, all_channels()),
+        ok = send_on_channel0(Sock, #'connection.update_secret_ok'{}, Protocol),
+        rabbit_log_connection:info(
+            "connection ~p (~s): "
+            "user '~s' updated secret, reason: ~s~n",
+            [self(), dynamic_connection_name(ConnName), Username, Reason]),
+        State#v1{connection = Conn#connection{user = User1}};
+      {refused, Message} ->
+        rabbit_log_connection:error("Secret update was refused for user '~p': ~p",
+                                    [Username, Message]),
+        rabbit_misc:protocol_error(not_allowed, "New secret was refused by one of the backends", []);
+      {error, Message} ->
+        rabbit_log_connection:error("Secret update for user '~p' failed: ~p",
+                                    [Username, Message]),
+        rabbit_misc:protocol_error(not_allowed,
+                                  "Secret update failed", [])
+    end;
 handle_method0(_Method, State) when ?IS_STOPPING(State) ->
     State;
 handle_method0(_Method, #v1{connection_state = S}) ->

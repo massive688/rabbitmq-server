@@ -40,6 +40,13 @@
 # num_acceptors.tcp = 10
 # num_acceptors.ssl = 10
 
+## Socket writer will force GC every so many bytes transferred.
+## Default is 1 GiB (`1000000000`). Set to 'off' to disable.
+##
+# socket_writer.gc_threshold = 1000000000
+#
+## To disable:
+# socket_writer.gc_threshold = off
 
 ## Maximum amount of time allowed for the AMQP 0-9-1 and AMQP 1.0 handshake
 ## (performed after socket connection and TLS handshake) to complete, in milliseconds.
@@ -199,6 +206,10 @@
 ##
 # ssl_handshake_timeout = 5000
 
+
+## Cluster name
+##
+# cluster_name = dev3.eng.megacorp.local
 
 ## Password hashing implementation. Will only affect newly
 ## created users. To recalculate hash for an existing user
@@ -425,17 +436,25 @@
 ## =====================
 ##
 
-## Set (internal) statistics collection granularity.
-##
-## Can be none, coarse or fine
-# collect_statistics = none
-
-# collect_statistics = coarse
-
 ## Statistics collection interval (in milliseconds). Increasing
 ## this will reduce the load on management database.
 ##
 # collect_statistics_interval = 5000
+
+## Fine vs. coarse statistics
+#
+# This value is no longer meant to be configured directly.
+#
+# See https://www.rabbitmq.com/management.html#fine-stats.
+
+##
+## Ra Settings
+## =====================
+##
+# raft.segment_max_entries = 65536
+# raft.wal_max_size_bytes = 1048576
+# raft.wal_max_batch_size = 32768
+# raft.snapshot_chunk_size = 1000000
 
 ##
 ## Misc/Advanced Options
@@ -444,7 +463,9 @@
 ## NB: Change these only if you understand what you are doing!
 ##
 
-## Explicitly enable/disable hipe compilation.
+## Explicitly enable/disable hipe compilation. This option is deprecated
+## because HiPE supported has been
+## effectively discontinued in Erlang 22.
 ##
 # hipe_compile = false
 
@@ -496,6 +517,17 @@
 ##
 # proxy_protocol = false
 
+## Overriden product name and version.
+## They are set to "RabbitMQ" and the release version by default.
+# product.name = RabbitMQ
+# product.version = 1.2.3
+
+## "Message of the day" file.
+## Its content is used to expand the logged and printed banners.
+## Default to /etc/rabbitmq/motd on Unix, %APPDATA%\RabbitMQ\motd.txt
+## on Windows.
+# motd_file = /etc/rabbitmq/motd
+
 ## ----------------------------------------------------------------------------
 ## Advanced Erlang Networking/Clustering Options.
 ##
@@ -512,7 +544,7 @@
 # net_ticktime = 60
 
 ## Inter-node communication port range.
-## The parameters inet_dist_listen_min and inet_dist_listen_max  
+## The parameters inet_dist_listen_min and inet_dist_listen_max
 ## can be configured in the classic config format only.
 ## Related doc guide: https://www.rabbitmq.com/networking.html#epmd-inet-dist-port-range.
 
@@ -578,7 +610,8 @@
 # management.ssl.ciphers.8 = ECDH-RSA-AES256-SHA384
 # management.ssl.ciphers.9 = DHE-RSA-AES256-GCM-SHA384
 
-
+## URL path prefix for HTTP API and management UI
+# management.path_prefix = /a-prefix
 
 ## One of 'basic', 'detailed' or 'none'. See
 ## https://rabbitmq.com/management.html#fine-stats for more details.
@@ -951,8 +984,8 @@
 ##
 ## Related doc guide: https://rabbitmq.com/ldap.html#authorisation.
 
-## Following configuration should be defined in additional.config file
-## DO NOT UNCOMMENT THIS LINES!
+## Following configuration should be defined in advanced.config file
+## DO NOT UNCOMMENT THESE LINES!
 
 ## Set the query to use when determining vhost access
 ##

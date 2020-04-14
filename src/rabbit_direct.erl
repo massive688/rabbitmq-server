@@ -11,13 +11,13 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2019 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_direct).
 
 -export([boot/0, force_event_refresh/1, list/0, connect/5,
-         start_channel/9, disconnect/2]).
+         start_channel/10, disconnect/2]).
 
 -deprecated([{force_event_refresh, 1, eventually}]).
 
@@ -132,7 +132,9 @@ extract_protocol(Infos) ->
 
 maybe_call_connection_info_module(Protocol, Creds, VHost, Pid, Infos) ->
     Module = rabbit_data_coercion:to_atom(string:to_lower(
-        "rabbit_" ++ rabbit_data_coercion:to_list(Protocol) ++ "_connection_info")
+        "rabbit_" ++
+        lists:flatten(string:replace(rabbit_data_coercion:to_list(Protocol), " ", "_", all)) ++
+        "_connection_info")
     ),
     Args = [Creds, VHost, Pid, Infos],
     code_server_cache:maybe_call_mfa(Module, additional_authn_params, Args, []).
@@ -185,7 +187,8 @@ connect1(User, VHost, Protocol, Pid, Infos) ->
     % Note: peer_host can be either a tuple or
     % a binary if reverse_dns_lookups is enabled
     PeerHost = proplists:get_value(peer_host, Infos),
-    try rabbit_access_control:check_vhost_access(User, VHost, {ip, PeerHost}) of
+    AuthzContext = proplists:get_value(variable_map, Infos, #{}),
+    try rabbit_access_control:check_vhost_access(User, VHost, {ip, PeerHost}, AuthzContext) of
         ok -> ok = pg_local:join(rabbit_direct, Pid),
 	      rabbit_core_metrics:connection_created(Pid, Infos),
               rabbit_event:notify(connection_created, Infos),
@@ -198,17 +201,16 @@ connect1(User, VHost, Protocol, Pid, Infos) ->
 -spec start_channel
         (rabbit_channel:channel_number(), pid(), pid(), string(),
          rabbit_types:protocol(), rabbit_types:user(), rabbit_types:vhost(),
-         rabbit_framing:amqp_table(), pid()) ->
+         rabbit_framing:amqp_table(), pid(), any()) ->
             {'ok', pid()}.
 
 start_channel(Number, ClientChannelPid, ConnPid, ConnName, Protocol, User,
-              VHost, Capabilities, Collector) ->
+              VHost, Capabilities, Collector, AmqpParams) ->
     {ok, _, {ChannelPid, _}} =
         supervisor2:start_child(
           rabbit_direct_client_sup,
           [{direct, Number, ClientChannelPid, ConnPid, ConnName, Protocol,
-            User, VHost, Capabilities, Collector}]),
-    _ = rabbit_channel:source(ChannelPid, ?MODULE),
+            User, VHost, Capabilities, Collector, AmqpParams}]),
     {ok, ChannelPid}.
 
 -spec disconnect(pid(), rabbit_event:event_props()) -> 'ok'.

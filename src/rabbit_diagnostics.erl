@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2019 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_diagnostics).
@@ -94,9 +94,12 @@ top_binary_refs(Count) ->
     io:format("~s ~p~n", [get_time(), Sorted]).
 
 binary_refs(Pid) ->
-    {binary, Refs} = info(Pid, binary, []),
-    lists:sum([Sz || {_Ptr, Sz} <- lists:usort([{Ptr, Sz} ||
-                                                   {Ptr, Sz, _Cnt} <- Refs])]).
+    case info(Pid, binary, []) of
+        {binary, Refs} ->
+            lists:sum([Sz || {_Ptr, Sz} <- lists:usort([{Ptr, Sz} ||
+                                                           {Ptr, Sz, _Cnt} <- Refs])]);
+        _ -> 0
+    end.
 
 info(Pid) ->
     [{pid, Pid} | info(Pid, ?PROCESS_INFO, [])].

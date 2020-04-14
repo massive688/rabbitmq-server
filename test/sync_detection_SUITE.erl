@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2019 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(sync_detection_SUITE).
@@ -213,7 +213,7 @@ slave_pids(Node, Queue) ->
 %% The mnesia synchronization takes a while, but we don't want to wait for the
 %% test to fail, since the timetrap is quite high.
 wait_for_sync_status(Status, Node, Queue) ->
-    Max = 30000 / ?LOOP_RECURSION_DELAY,
+    Max = 90000 / ?LOOP_RECURSION_DELAY,
     wait_for_sync_status(0, Max, Status, Node, Queue).
 
 wait_for_sync_status(N, Max, Status, Node, Queue) when N >= Max ->

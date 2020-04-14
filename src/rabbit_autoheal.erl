@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2019 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_autoheal).
@@ -372,6 +372,7 @@ wait_for_supervisors(Monitors) ->
 restart_loser(State, Winner) ->
     rabbit_log:warning(
       "Autoheal: we were selected to restart; winner is ~p~n", [Winner]),
+    NextStateTimeout = application:get_env(rabbit, autoheal_state_transition_timeout, 60000),
     rabbit_node_monitor:run_outside_applications(
       fun () ->
               MRef = erlang:monitor(process, {?SERVER, Winner}),
@@ -381,6 +382,11 @@ restart_loser(State, Winner) ->
                       not_healing;
                   autoheal_safe_to_start ->
                       State
+                  after NextStateTimeout ->
+                      rabbit_log:warning(
+                          "Autoheal: timed out waiting for a safe-to-start message from the winner (~p); will retry",
+                          [Winner]),
+                      not_healing
               end,
               erlang:demonitor(MRef, [flush]),
               %% During the restart, the autoheal state is lost so we

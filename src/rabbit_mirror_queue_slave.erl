@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2010-2019 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2010-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_mirror_queue_slave).
@@ -717,10 +717,10 @@ promote_me(From, #state { q                   = Q0,
                     QName, CPid, BQ, BQS, GM, AckTags, SS, MPids),
 
     MTC = maps:fold(fun (MsgId, {published, ChPid, MsgSeqNo}, MTC0) ->
-                            gb_trees:insert(MsgId, {ChPid, MsgSeqNo}, MTC0);
+                            maps:put(MsgId, {ChPid, MsgSeqNo}, MTC0);
                         (_Msgid, _Status, MTC0) ->
                             MTC0
-                    end, gb_trees:empty(), MS),
+                    end, #{}, MS),
     Deliveries = [promote_delivery(Delivery) ||
                    {_ChPid, {PubQ, _PendCh, _ChState}} <- maps:to_list(SQ),
                    Delivery <- queue:to_list(PubQ)],

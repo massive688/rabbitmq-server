@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2019 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_auth_backend_internal).
@@ -21,14 +21,14 @@
 -behaviour(rabbit_authz_backend).
 
 -export([user_login_authentication/2, user_login_authorization/2,
-         check_vhost_access/3, check_resource_access/3, check_topic_access/4]).
+         check_vhost_access/3, check_resource_access/4, check_topic_access/4]).
 
 -export([add_user/3, delete_user/2, lookup_user/1,
          change_password/3, clear_password/2,
          hash_password/2, change_password_hash/2, change_password_hash/3,
          set_tags/3, set_permissions/6, clear_permissions/3,
          set_topic_permissions/6, clear_topic_permissions/3, clear_topic_permissions/4,
-         add_user_sans_validation/3]).
+         add_user_sans_validation/3, put_user/2, put_user/3]).
 
 -export([user_info_keys/0, perms_info_keys/0,
          user_perms_info_keys/0, vhost_perms_info_keys/0,
@@ -39,6 +39,8 @@
          list_vhost_permissions/1, list_vhost_permissions/3,
          list_user_vhost_permissions/2,
          list_user_topic_permissions/1, list_vhost_topic_permissions/1, list_user_vhost_topic_permissions/2]).
+
+-export([state_can_expire/0]).
 
 %% for testing
 -export([hashing_module_for_user/1, expand_topic_permission/2]).
@@ -93,6 +95,8 @@ user_login_authentication(Username, AuthProps) ->
         false -> exit({unknown_auth_props, Username, AuthProps})
     end.
 
+state_can_expire() -> false.
+
 user_login_authorization(Username, _AuthProps) ->
     case user_login_authentication(Username, []) of
         {ok, #auth_user{impl = Impl, tags = Tags}} -> {ok, Impl, Tags};
@@ -123,7 +127,8 @@ check_vhost_access(#auth_user{username = Username}, VHostPath, _AuthzData) ->
 
 check_resource_access(#auth_user{username = Username},
                       #resource{virtual_host = VHostPath, name = Name},
-                      Permission) ->
+                      Permission,
+                      _AuthContext) ->
     case mnesia:dirty_read({rabbit_user_permission,
                             #user_vhost{username     = Username,
                                         virtual_host = VHostPath}}) of
@@ -466,6 +471,138 @@ clear_topic_permissions(Username, VHostPath, Exchange, ActingUser) ->
         {user_who_performed_action, ActingUser}]),
     R.
 
+put_user(User, ActingUser) -> put_user(User, undefined, ActingUser).
+
+put_user(User, Version, ActingUser) ->
+    Username        = maps:get(name, User),
+    HasPassword     = maps:is_key(password, User),
+    HasPasswordHash = maps:is_key(password_hash, User),
+    Password        = maps:get(password, User, undefined),
+    PasswordHash    = maps:get(password_hash, User, undefined),
+
+    Tags            = case {maps:get(tags, User, undefined), maps:get(administrator, User, undefined)} of
+                          {undefined, undefined} ->
+                              throw({error, tags_not_present});
+                          {undefined, AdminS} ->
+                              case rabbit_misc:parse_bool(AdminS) of
+                                  true  -> [administrator];
+                                  false -> []
+                              end;
+                          {TagsS, _} ->
+                              [list_to_atom(string:strip(T)) ||
+                                  T <- string:tokens(binary_to_list(TagsS), ",")]
+                      end,
+
+    UserExists      = case rabbit_auth_backend_internal:lookup_user(Username) of
+                          %% expected
+                          {error, not_found} -> false;
+                          %% shouldn't normally happen but worth guarding
+                          %% against
+                          {error, _}         -> false;
+                          _                  -> true
+                      end,
+
+    %% pre-configured, only applies to newly created users
+    Permissions     = maps:get(permissions, User, undefined),
+
+    PassedCredentialValidation =
+        case {HasPassword, HasPasswordHash} of
+            {true, false} ->
+                rabbit_credential_validation:validate(Username, Password) =:= ok;
+            {false, true} -> true;
+            _             ->
+                rabbit_credential_validation:validate(Username, Password) =:= ok
+        end,
+
+    case UserExists of
+        true  ->
+            case {HasPassword, HasPasswordHash} of
+                {true, false} ->
+                    update_user_password(PassedCredentialValidation, Username, Password, Tags, ActingUser);
+                {false, true} ->
+                    update_user_password_hash(Username, PasswordHash, Tags, User, Version, ActingUser);
+                {true, true} ->
+                    throw({error, both_password_and_password_hash_are_provided});
+                %% clear password, update tags if needed
+                _ ->
+                    rabbit_auth_backend_internal:set_tags(Username, Tags, ActingUser),
+                    rabbit_auth_backend_internal:clear_password(Username, ActingUser)
+            end;
+        false ->
+            case {HasPassword, HasPasswordHash} of
+                {true, false}  ->
+                    create_user_with_password(PassedCredentialValidation, Username, Password, Tags, Permissions, ActingUser);
+                {false, true}  ->
+                    create_user_with_password_hash(Username, PasswordHash, Tags, User, Version, Permissions, ActingUser);
+                {true, true}   ->
+                    throw({error, both_password_and_password_hash_are_provided});
+                {false, false} ->
+                    %% this user won't be able to sign in using
+                    %% a username/password pair but can be used for x509 certificate authentication,
+                    %% with authn backends such as HTTP or LDAP and so on.
+                    create_user_with_password(PassedCredentialValidation, Username, <<"">>, Tags, Permissions, ActingUser)
+            end
+    end.
+
+update_user_password(_PassedCredentialValidation = true,  Username, Password, Tags, ActingUser) ->
+    rabbit_auth_backend_internal:change_password(Username, Password, ActingUser),
+    rabbit_auth_backend_internal:set_tags(Username, Tags, ActingUser);
+update_user_password(_PassedCredentialValidation = false, _Username, _Password, _Tags, _ActingUser) ->
+    %% we don't log here because
+    %% rabbit_auth_backend_internal will do it
+    throw({error, credential_validation_failed}).
+
+update_user_password_hash(Username, PasswordHash, Tags, User, Version, ActingUser) ->
+    %% when a hash this provided, credential validation
+    %% is not applied
+    HashingAlgorithm = hashing_algorithm(User, Version),
+
+    Hash = rabbit_misc:b64decode_or_throw(PasswordHash),
+    rabbit_auth_backend_internal:change_password_hash(
+      Username, Hash, HashingAlgorithm),
+    rabbit_auth_backend_internal:set_tags(Username, Tags, ActingUser).
+
+create_user_with_password(_PassedCredentialValidation = true,  Username, Password, Tags, undefined, ActingUser) ->
+    rabbit_auth_backend_internal:add_user(Username, Password, ActingUser),
+    rabbit_auth_backend_internal:set_tags(Username, Tags, ActingUser);
+create_user_with_password(_PassedCredentialValidation = true,  Username, Password, Tags, PreconfiguredPermissions, ActingUser) ->
+    rabbit_auth_backend_internal:add_user(Username, Password, ActingUser),
+    rabbit_auth_backend_internal:set_tags(Username, Tags, ActingUser),
+    preconfigure_permissions(Username, PreconfiguredPermissions, ActingUser);
+create_user_with_password(_PassedCredentialValidation = false, _Username, _Password, _Tags, _, _) ->
+    %% we don't log here because
+    %% rabbit_auth_backend_internal will do it
+    throw({error, credential_validation_failed}).
+
+create_user_with_password_hash(Username, PasswordHash, Tags, User, Version, PreconfiguredPermissions, ActingUser) ->
+    %% when a hash this provided, credential validation
+    %% is not applied
+    HashingAlgorithm = hashing_algorithm(User, Version),
+    Hash             = rabbit_misc:b64decode_or_throw(PasswordHash),
+
+    %% first we create a user with dummy credentials and no
+    %% validation applied, then we update password hash
+    TmpPassword = rabbit_guid:binary(rabbit_guid:gen_secure(), "tmp"),
+    rabbit_auth_backend_internal:add_user_sans_validation(Username, TmpPassword, ActingUser),
+
+    rabbit_auth_backend_internal:change_password_hash(
+      Username, Hash, HashingAlgorithm),
+    rabbit_auth_backend_internal:set_tags(Username, Tags, ActingUser),
+    preconfigure_permissions(Username, PreconfiguredPermissions, ActingUser).
+
+preconfigure_permissions(_Username, undefined, _ActingUser) ->
+    ok;
+preconfigure_permissions(Username, Map, ActingUser) when is_map(Map) ->
+    maps:map(fun(VHost, M) ->
+                     rabbit_auth_backend_internal:set_permissions(Username, VHost,
+                                                  maps:get(<<"configure">>, M),
+                                                  maps:get(<<"write">>,     M),
+                                                  maps:get(<<"read">>,      M),
+                                                  ActingUser)
+             end,
+             Map),
+    ok.
+
 %%----------------------------------------------------------------------------
 %% Listing
 
@@ -644,3 +781,21 @@ extract_topic_permission_params(Keys, #topic_permission{
         {exchange,  Exchange},
         {write,     WritePerm},
         {read,      ReadPerm}]).
+
+hashing_algorithm(User, Version) ->
+    case maps:get(hashing_algorithm, User, undefined) of
+        undefined ->
+            case Version of
+                %% 3.6.1 and later versions are supposed to have
+                %% the algorithm exported and thus not need a default
+                <<"3.6.0">>          -> rabbit_password_hashing_sha256;
+                <<"3.5.", _/binary>> -> rabbit_password_hashing_md5;
+                <<"3.4.", _/binary>> -> rabbit_password_hashing_md5;
+                <<"3.3.", _/binary>> -> rabbit_password_hashing_md5;
+                <<"3.2.", _/binary>> -> rabbit_password_hashing_md5;
+                <<"3.1.", _/binary>> -> rabbit_password_hashing_md5;
+                <<"3.0.", _/binary>> -> rabbit_password_hashing_md5;
+                _                    -> rabbit_password:hashing_mod()
+            end;
+        Alg       -> rabbit_data_coercion:to_atom(Alg, utf8)
+    end.

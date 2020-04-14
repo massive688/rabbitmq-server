@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2019 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_auth_mechanism_plain).
@@ -30,9 +30,6 @@
 
 %% SASL PLAIN, as used by the Qpid Java client and our clients. Also,
 %% apparently, by OpenAMQ.
-
-%% TODO: reimplement this using the binary module? - that makes use of
-%% BIFs to do binary matching and will thus be much faster.
 
 description() ->
     [{description, <<"SASL PLAIN authentication mechanism">>}].

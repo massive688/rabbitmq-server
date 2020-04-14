@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2019 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_channel_sup).
@@ -71,7 +71,7 @@ start_link({tcp, Sock, Channel, FrameMax, ReaderPid, ConnName, Protocol, User,
     {ok, AState} = rabbit_command_assembler:init(Protocol),
     {ok, SupPid, {ChannelPid, AState}};
 start_link({direct, Channel, ClientChannelPid, ConnPid, ConnName, Protocol,
-            User, VHost, Capabilities, Collector}) ->
+            User, VHost, Capabilities, Collector, AmqpParams}) ->
     {ok, SupPid} = supervisor2:start_link(
                      ?MODULE, {direct, {ConnName, Channel}}),
     [LimiterPid] = supervisor2:find_child(SupPid, limiter),
@@ -81,7 +81,7 @@ start_link({direct, Channel, ClientChannelPid, ConnPid, ConnName, Protocol,
           {channel, {rabbit_channel, start_link,
                      [Channel, ClientChannelPid, ClientChannelPid, ConnPid,
                       ConnName, Protocol, User, VHost, Capabilities, Collector,
-                      LimiterPid]},
+                      LimiterPid, AmqpParams]},
            intrinsic, ?FAIR_WAIT, worker, [rabbit_channel]}),
     {ok, SupPid, {ChannelPid, none}}.
 

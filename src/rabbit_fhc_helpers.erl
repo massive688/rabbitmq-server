@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2019 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_fhc_helpers).
@@ -24,7 +24,7 @@ clear_read_cache() ->
     case application:get_env(rabbit, fhc_read_buffering) of
         {ok, true} ->
             file_handle_cache:clear_read_cache(),
-            clear_vhost_read_cache(rabbit_vhost:list());
+            clear_vhost_read_cache(rabbit_vhost:list_names());
         _ -> %% undefined or {ok, false}
             ok
     end.

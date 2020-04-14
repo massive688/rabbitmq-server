@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2019 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_policy).
@@ -43,7 +43,7 @@
 
 -export([register/0]).
 -export([invalidate/0, recover/0]).
--export([name/1, name_op/1, effective_definition/1, get/2, get_arg/3, set/1]).
+-export([name/1, name_op/1, effective_definition/1, merge_operator_definitions/2, get/2, get_arg/3, set/1]).
 -export([validate/5, notify/5, notify_clear/4]).
 -export([parse_set/7, set/7, delete/3, lookup/2, list/0, list/1,
          list_formatted/1, list_formatted/3, info_keys/0]).
@@ -76,23 +76,23 @@ name0(Policy)    -> pget(name, Policy).
 effective_definition(Q) when ?is_amqqueue(Q) ->
     Policy = amqqueue:get_policy(Q),
     OpPolicy = amqqueue:get_operator_policy(Q),
-    effective_definition0(Policy, OpPolicy);
+    merge_operator_definitions(Policy, OpPolicy);
 effective_definition(#exchange{policy = Policy, operator_policy = OpPolicy}) ->
-    effective_definition0(Policy, OpPolicy).
+    merge_operator_definitions(Policy, OpPolicy).
 
-effective_definition0(undefined, undefined) -> undefined;
-effective_definition0(Policy, undefined)    -> pget(definition, Policy);
-effective_definition0(undefined, OpPolicy)  -> pget(definition, OpPolicy);
-effective_definition0(Policy, OpPolicy) ->
-    OpDefinition = pget(definition, OpPolicy, []),
-    Definition = pget(definition, Policy, []),
-    {Keys, _} = lists:unzip(Definition),
-    {OpKeys, _} = lists:unzip(OpDefinition),
+merge_operator_definitions(undefined, undefined) -> undefined;
+merge_operator_definitions(Policy, undefined)    -> pget(definition, Policy);
+merge_operator_definitions(undefined, OpPolicy)  -> pget(definition, OpPolicy);
+merge_operator_definitions(Policy, OpPolicy) ->
+    OpDefinition = rabbit_data_coercion:to_map(pget(definition, OpPolicy, [])),
+    Definition   = rabbit_data_coercion:to_map(pget(definition, Policy, [])),
+    Keys = maps:keys(Definition),
+    OpKeys = maps:keys(OpDefinition),
     lists:map(fun(Key) ->
-        case {pget(Key, Definition), pget(Key, OpDefinition)} of
-            {Val, undefined}       -> {Key, Val};
-            {undefined, Val}       -> {Key, Val};
-            {Val, OpVal}           -> {Key, merge_policy_value(Key, Val, OpVal)}
+        case {maps:get(Key, Definition, undefined), maps:get(Key, OpDefinition, undefined)} of
+            {Val, undefined}   -> {Key, Val};
+            {undefined, OpVal} -> {Key, OpVal};
+            {Val, OpVal}       -> {Key, merge_policy_value(Key, Val, OpVal)}
         end
     end,
     lists:umerge(Keys, OpKeys)).
@@ -142,11 +142,11 @@ get0(Name, Policy, OpPolicy) ->
 merge_policy_value(Name, PolicyVal, OpVal) ->
     case policy_merge_strategy(Name) of
         {ok, Module}       -> Module:merge_policy_value(Name, PolicyVal, OpVal);
-        {error, not_found} -> PolicyVal
+        {error, not_found} -> rabbit_policies:merge_policy_value(Name, PolicyVal, OpVal)
     end.
 
 policy_merge_strategy(Name) ->
-    case rabbit_registry:binary_to_type(Name) of
+    case rabbit_registry:binary_to_type(rabbit_data_coercion:to_binary(Name)) of
         {error, not_found} ->
             {error, not_found};
         T                  ->
@@ -463,8 +463,9 @@ match(Name, Policies) ->
 match_all(Name, Policies) ->
    lists:sort(fun sort_pred/2, [P || P <- Policies, matches(Name, P)]).
 
-matches(#resource{name = Name, kind = Kind, virtual_host = VHost}, Policy) ->
+matches(#resource{name = Name, kind = Kind, virtual_host = VHost} = Resource, Policy) ->
     matches_type(Kind, pget('apply-to', Policy)) andalso
+        is_applicable(Resource, pget(definition, Policy)) andalso
         match =:= re:run(Name, pget(pattern, Policy), [{capture, none}]) andalso
         VHost =:= pget(vhost, Policy).
 
@@ -475,6 +476,11 @@ matches_type(queue,    <<"all">>)       -> true;
 matches_type(_,        _)               -> false.
 
 sort_pred(A, B) -> pget(priority, A) >= pget(priority, B).
+
+is_applicable(#resource{kind = queue} = Resource, Policy) ->
+    rabbit_amqqueue:is_policy_applicable(Resource, Policy);
+is_applicable(_, _) ->
+    true.
 
 %%----------------------------------------------------------------------------
 

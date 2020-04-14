@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2019 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_amqqueue_process).
@@ -32,6 +32,8 @@
 -export([init/1, terminate/2, code_change/3, handle_call/3, handle_cast/2,
          handle_info/2, handle_pre_hibernate/1, prioritise_call/4,
          prioritise_cast/3, prioritise_info/3, format_message_queue/2]).
+-export([format/1]).
+-export([is_policy_applicable/2]).
 
 %% Queue's state
 -record(q, {
@@ -82,7 +84,7 @@
             %% max length in bytes, if configured
             max_bytes,
             %% an action to perform if queue is to be over a limit,
-            %% can be either drop-head (default) or reject-publish
+            %% can be either drop-head (default), reject-publish or reject-publish-dlx
             overflow,
             %% when policies change, this version helps queue
             %% determine what previously scheduled/set up state to ignore,
@@ -163,7 +165,7 @@ init_state(Q) ->
                has_had_consumers         = false,
                consumers                 = rabbit_queue_consumers:new(),
                senders                   = pmon:new(delegate),
-               msg_id_to_channel         = gb_trees:empty(),
+               msg_id_to_channel         = #{},
                status                    = running,
                args_policy_version       = 0,
                overflow                  = 'drop-head',
@@ -261,7 +263,7 @@ recovery_barrier(BarrierPid) ->
 
 -spec init_with_backing_queue_state
         (amqqueue:amqqueue(), atom(), tuple(), any(),
-         [rabbit_types:delivery()], pmon:pmon(), gb_trees:tree()) ->
+         [rabbit_types:delivery()], pmon:pmon(), maps:map()) ->
             #q{}.
 
 init_with_backing_queue_state(Q, BQ, BQS,
@@ -599,16 +601,26 @@ confirm_messages(MsgIds, MTC) ->
     {CMs, MTC1} =
         lists:foldl(
           fun(MsgId, {CMs, MTC0}) ->
-                  case gb_trees:lookup(MsgId, MTC0) of
-                      {value, {SenderPid, MsgSeqNo}} ->
-                          {rabbit_misc:gb_trees_cons(SenderPid,
-                                                     MsgSeqNo, CMs),
-                           gb_trees:delete(MsgId, MTC0)};
+                  case maps:get(MsgId, MTC0, none) of
                       none ->
-                          {CMs, MTC0}
+                          {CMs, MTC0};
+                      {SenderPid, MsgSeqNo} ->
+                          {maps:update_with(SenderPid,
+                                            fun(MsgSeqNos) ->
+                                                [MsgSeqNo | MsgSeqNos]
+                                            end,
+                                            [MsgSeqNo],
+                                            CMs),
+                           maps:remove(MsgId, MTC0)}
+
                   end
-          end, {gb_trees:empty(), MTC}, MsgIds),
-    rabbit_misc:gb_trees_foreach(fun rabbit_misc:confirm_to_sender/2, CMs),
+          end, {#{}, MTC}, MsgIds),
+    maps:fold(
+        fun(Pid, MsgSeqNos, _) ->
+            rabbit_misc:confirm_to_sender(Pid, MsgSeqNos)
+        end,
+        ok,
+        CMs),
     MTC1.
 
 send_or_record_confirm(#delivery{confirm    = false}, State) ->
@@ -622,7 +634,7 @@ send_or_record_confirm(#delivery{confirm    = true,
                        State = #q{q                 = Q,
                                   msg_id_to_channel = MTC})
   when ?amqqueue_is_durable(Q) ->
-    MTC1 = gb_trees:insert(MsgId, {SenderPid, MsgSeqNo}, MTC),
+    MTC1 = maps:put(MsgId, {SenderPid, MsgSeqNo}, MTC),
     {eventually, State#q{msg_id_to_channel = MTC1}};
 send_or_record_confirm(#delivery{confirm    = true,
                                  sender     = SenderPid,
@@ -704,10 +716,23 @@ maybe_deliver_or_enqueue(Delivery = #delivery{message = Message},
                          Delivered,
                          State = #q{overflow            = Overflow,
                                     backing_queue       = BQ,
-                                    backing_queue_state = BQS}) ->
+                                    backing_queue_state = BQS,
+                                    dlx                 = DLX,
+                                    dlx_routing_key     = RK}) ->
     send_mandatory(Delivery), %% must do this before confirms
     case {will_overflow(Delivery, State), Overflow} of
         {true, 'reject-publish'} ->
+            %% Drop publish and nack to publisher
+            send_reject_publish(Delivery, Delivered, State);
+        {true, 'reject-publish-dlx'} ->
+            %% Publish to DLX
+            with_dlx(
+              DLX,
+              fun (X) ->
+                      QName = qname(State),
+                      rabbit_dead_letter:publish(Message, maxlen, X, RK, QName)
+              end,
+              fun () -> ok end),
             %% Drop publish and nack to publisher
             send_reject_publish(Delivery, Delivered, State);
         _ ->
@@ -766,6 +791,8 @@ maybe_drop_head(State = #q{max_length = undefined,
     {false, State};
 maybe_drop_head(State = #q{overflow = 'reject-publish'}) ->
     {false, State};
+maybe_drop_head(State = #q{overflow = 'reject-publish-dlx'}) ->
+    {false, State};
 maybe_drop_head(State = #q{overflow = 'drop-head'}) ->
     maybe_drop_head(false, State).
 
@@ -786,14 +813,18 @@ maybe_drop_head(AlreadyDropped, State = #q{backing_queue       = BQ,
     end.
 
 send_reject_publish(#delivery{confirm = true,
-                                sender = SenderPid,
-                                msg_seq_no = MsgSeqNo} = Delivery,
+                              sender = SenderPid,
+                              flow = Flow,
+                              msg_seq_no = MsgSeqNo,
+                              message = #basic_message{id = MsgId}},
                       _Delivered,
                       State = #q{ backing_queue = BQ,
                                   backing_queue_state = BQS,
                                   msg_id_to_channel   = MTC}) ->
-    {BQS1, MTC1} = discard(Delivery, BQ, BQS, MTC),
     gen_server2:cast(SenderPid, {reject_publish, MsgSeqNo, self()}),
+
+    MTC1 = maps:remove(MsgId, MTC),
+    BQS1 = BQ:discard(MsgId, SenderPid, Flow, BQS),
     State#q{ backing_queue_state = BQS1, msg_id_to_channel = MTC1 };
 send_reject_publish(#delivery{confirm = false},
                       _Delivered, State) ->
@@ -1037,7 +1068,16 @@ stop(State) -> stop(noreply, State).
 stop(noreply, State) -> {stop, normal, State};
 stop(Reply,   State) -> {stop, normal, Reply, State}.
 
-infos(Items, State) -> [{Item, i(Item, State)} || Item <- Items].
+infos(Items, #q{q = Q} = State) ->
+    lists:foldr(fun(totals, Acc) ->
+                        [{messages_ready, i(messages_ready, State)},
+                         {messages, i(messages, State)},
+                         {messages_unacknowledged, i(messages_unacknowledged, State)}] ++ Acc;
+                   (type_specific, Acc) ->
+                        format(Q) ++ Acc;
+                   (Item, Acc) ->
+                        [{Item, i(Item, State)} | Acc]
+                end, [], Items).
 
 i(name,        #q{q = Q}) -> amqqueue:get_name(Q);
 i(durable,     #q{q = Q}) -> amqqueue:is_durable(Q);
@@ -1586,6 +1626,9 @@ handle_cast({credit, ChPid, CTag, Credit, Drain},
                                      run_message_queue(true, State1)
       end);
 
+% Note: https://www.pivotaltracker.com/story/show/166962656
+% This event is necessary for the stats timer to be initialized with
+% the correct values once the management agent has started
 handle_cast({force_event_refresh, Ref},
             State = #q{consumers       = Consumers,
                        active_consumer = Holder}) ->
@@ -1728,6 +1771,22 @@ handle_pre_hibernate(State = #q{backing_queue = BQ,
     {hibernate, stop_rate_timer(State1)}.
 
 format_message_queue(Opt, MQ) -> rabbit_misc:format_message_queue(Opt, MQ).
+
+format(Q) when ?is_amqqueue(Q) ->
+    case rabbit_mirror_queue_misc:is_mirrored(Q) of
+        false ->
+            [{node, node(amqqueue:get_pid(Q))}];
+        true ->
+            Slaves = amqqueue:get_slave_pids(Q),
+            SSlaves = amqqueue:get_sync_slave_pids(Q),
+            [{slave_nodes, [node(S) || S <- Slaves]},
+             {synchronised_slave_nodes, [node(S) || S <- SSlaves]},
+             {node, node(amqqueue:get_pid(Q))}]
+    end.
+
+-spec is_policy_applicable(amqqueue:amqqueue(), any()) -> boolean().
+is_policy_applicable(_Q, _Policy) ->
+    true.
 
 log_delete_exclusive({ConPid, _ConRef}, State) ->
     log_delete_exclusive(ConPid, State);

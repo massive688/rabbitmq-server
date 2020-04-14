@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2011-2019 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2011-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(topic_permission_SUITE).
@@ -156,10 +156,10 @@ topic_permission_checks1(_Config) ->
     0 = length(ets:tab2list(rabbit_topic_permission)),
     rabbit_misc:execute_mnesia_transaction(fun() ->
         ok = mnesia:write(rabbit_vhost,
-            #vhost{virtual_host = <<"/">>},
+            vhost:new(<<"/">>, []),
             write),
         ok = mnesia:write(rabbit_vhost,
-            #vhost{virtual_host = <<"other-vhost">>},
+            vhost:new(<<"other-vhost">>, []),
             write)
                                            end),
     rabbit_auth_backend_internal:add_user(<<"guest">>, <<"guest">>, <<"acting-user">>),

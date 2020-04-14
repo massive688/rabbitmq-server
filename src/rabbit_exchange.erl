@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2019 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_exchange).
@@ -20,11 +20,11 @@
 
 -export([recover/1, policy_changed/2, callback/4, declare/7,
          assert_equivalence/6, assert_args_equivalence/2, check_type/1,
-         lookup/1, lookup_or_die/1, list/0, list/1, lookup_scratch/2,
+         lookup/1, lookup_many/1, lookup_or_die/1, list/0, list/1, lookup_scratch/2,
          update_scratch/3, update_decorators/1, immutable/1,
          info_keys/0, info/1, info/2, info_all/1, info_all/2, info_all/4,
-         route/2, delete/3, validate_binding/2]).
--export([list_names/0]).
+         route/2, delete/3, validate_binding/2, count/0]).
+-export([list_names/0, is_amq_prefixed/1]).
 %% these must be run inside a mnesia tx
 -export([maybe_auto_delete/2, serial/1, peek_serial/1, update/2]).
 
@@ -102,6 +102,18 @@ serial(#exchange{name = XName} = X) ->
         (false) -> none
     end.
 
+-spec is_amq_prefixed(rabbit_types:exchange() | binary()) -> boolean().
+
+is_amq_prefixed(Name) when is_binary(Name) ->
+    case re:run(Name, <<"^amq\.">>) of
+        nomatch    -> false;
+        {match, _} -> true
+    end;
+is_amq_prefixed(#exchange{name = #resource{name = <<>>}}) ->
+    false;
+is_amq_prefixed(#exchange{name = #resource{name = Name}}) ->
+    is_amq_prefixed(Name).
+
 -spec declare
         (name(), type(), boolean(), boolean(), boolean(),
          rabbit_framing:amqp_table(), rabbit_types:username())
@@ -174,7 +186,7 @@ store_ram(X) ->
         (binary()) -> atom() | rabbit_types:connection_exit().
 
 check_type(TypeBin) ->
-    case rabbit_registry:binary_to_type(TypeBin) of
+    case rabbit_registry:binary_to_type(rabbit_data_coercion:to_binary(TypeBin)) of
         {error, not_found} ->
             rabbit_misc:protocol_error(
               command_invalid, "unknown exchange type '~s'", [TypeBin]);
@@ -224,6 +236,17 @@ assert_args_equivalence(#exchange{ name = Name, arguments = Args },
 lookup(Name) ->
     rabbit_misc:dirty_read({rabbit_exchange, Name}).
 
+
+-spec lookup_many([name()]) -> [rabbit_types:exchange()].
+
+lookup_many([])     -> [];
+lookup_many([Name]) -> ets:lookup(rabbit_exchange, Name);
+lookup_many(Names) when is_list(Names) ->
+    %% Normally we'd call mnesia:dirty_read/1 here, but that is quite
+    %% expensive for reasons explained in rabbit_misc:dirty_read/1.
+    lists:append([ets:lookup(rabbit_exchange, Name) || Name <- Names]).
+
+
 -spec lookup_or_die
         (name()) -> rabbit_types:exchange() |
                     rabbit_types:channel_exit().
@@ -237,6 +260,11 @@ lookup_or_die(Name) ->
 -spec list() -> [rabbit_types:exchange()].
 
 list() -> mnesia:dirty_match_object(rabbit_exchange, #exchange{_ = '_'}).
+
+-spec count() -> non_neg_integer().
+
+count() ->
+    mnesia:table_info(rabbit_exchange, size).
 
 -spec list_names() -> [rabbit_exchange:name()].
 

@@ -1,0 +1,77 @@
+load("@rules_erlang//:xref2.bzl", "xref")
+load("@rules_erlang//:dialyze.bzl", "dialyze", "plt")
+load(
+    "//:rabbitmq.bzl",
+    "RABBITMQ_DIALYZER_OPTS",
+    "assert_suites",
+    "broker_for_integration_suites",
+    "rabbitmq_app",
+    "rabbitmq_integration_suite",
+)
+
+APP_NAME = "rabbitmq_prometheus"
+
+APP_MODULE = "rabbit_prometheus_app"
+
+APP_ENV = """[
+	{return_per_object_metrics, false}
+]"""
+
+BUILD_DEPS = [
+    "//deps/amqp_client:erlang_app",
+    "//deps/rabbit_common:erlang_app",
+]
+
+DEPS = [
+    "@prometheus//:erlang_app",
+]
+
+RUNTIME_DEPS = [
+    "//deps/rabbit:erlang_app",
+    "//deps/rabbitmq_management_agent:erlang_app",
+    "//deps/rabbitmq_web_dispatch:erlang_app",
+    "@accept//:erlang_app",
+    "@cowboy//:erlang_app",
+]
+
+rabbitmq_app(
+    app_module = APP_MODULE,
+    app_name = APP_NAME,
+    build_deps = BUILD_DEPS,
+    runtime_deps = RUNTIME_DEPS,
+    deps = DEPS,
+)
+
+xref()
+
+plt(
+    name = "base_plt",
+    plt = "//:base_plt",
+    deps = BUILD_DEPS + DEPS + RUNTIME_DEPS,
+)
+
+dialyze(
+    dialyzer_opts = RABBITMQ_DIALYZER_OPTS,
+    plt = ":base_plt",
+)
+
+broker_for_integration_suites()
+
+rabbitmq_integration_suite(
+    name = "config_schema_SUITE",
+    size = "small",
+)
+
+rabbitmq_integration_suite(
+    name = "rabbit_prometheus_http_SUITE",
+    size = "medium",
+    flaky = True,
+)
+
+assert_suites()
+
+alias(
+    name = "rabbitmq_prometheus",
+    actual = ":erlang_app",
+    visibility = ["//visibility:public"],
+)

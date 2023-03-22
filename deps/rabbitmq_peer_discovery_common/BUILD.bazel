@@ -1,0 +1,67 @@
+load("@rules_erlang//:xref2.bzl", "xref")
+load("@rules_erlang//:dialyze.bzl", "dialyze", "plt")
+load(
+    "//:rabbitmq.bzl",
+    "RABBITMQ_DIALYZER_OPTS",
+    "RABBITMQ_ERLC_OPTS",
+    "RABBITMQ_TEST_ERLC_OPTS",
+    "assert_suites",
+    "broker_for_integration_suites",
+    "rabbitmq_app",
+    "rabbitmq_integration_suite",
+)
+
+APP_NAME = "rabbitmq_peer_discovery_common"
+
+APP_DESCRIPTION = "Modules shared by various peer discovery backends"
+
+APP_MODULE = "rabbit_peer_discovery_common_app"
+
+EXTRA_APPS = [
+    "inets",
+]
+
+DEPS = [
+    "//deps/rabbit_common:erlang_app",
+]
+
+RUNTIME_DEPS = [
+    "//deps/rabbit:erlang_app",
+]
+
+rabbitmq_app(
+    app_description = APP_DESCRIPTION,
+    app_module = APP_MODULE,
+    app_name = APP_NAME,
+    extra_apps = EXTRA_APPS,
+    runtime_deps = RUNTIME_DEPS,
+    deps = DEPS,
+)
+
+xref()
+
+plt(
+    name = "base_plt",
+    apps = EXTRA_APPS,
+    plt = "//:base_plt",
+    deps = DEPS + RUNTIME_DEPS,
+)
+
+dialyze(
+    dialyzer_opts = RABBITMQ_DIALYZER_OPTS,
+    plt = ":base_plt",
+)
+
+broker_for_integration_suites()
+
+rabbitmq_integration_suite(
+    name = "config_schema_SUITE",
+)
+
+assert_suites()
+
+alias(
+    name = "rabbitmq_peer_discovery_common",
+    actual = ":erlang_app",
+    visibility = ["//visibility:public"],
+)

@@ -1,0 +1,66 @@
+load("@rules_erlang//:xref2.bzl", "xref")
+load("@rules_erlang//:dialyze.bzl", "dialyze", "plt")
+load(
+    "//:rabbitmq.bzl",
+    "BROKER_VERSION_REQUIREMENTS_ANY",
+    "RABBITMQ_DIALYZER_OPTS",
+    "assert_suites",
+    "broker_for_integration_suites",
+    "rabbitmq_app",
+    "rabbitmq_integration_suite",
+    "rabbitmq_suite",
+)
+
+APP_NAME = "rabbitmq_event_exchange"
+
+APP_DESCRIPTION = "Event Exchange Type"
+
+DEPS = [
+    "//deps/rabbit_common:erlang_app",
+    "//deps/rabbit:erlang_app",
+]
+
+rabbitmq_app(
+    app_description = APP_DESCRIPTION,
+    app_extra_keys = BROKER_VERSION_REQUIREMENTS_ANY,
+    app_name = APP_NAME,
+    deps = DEPS,
+)
+
+xref()
+
+plt(
+    name = "base_plt",
+    plt = "//:base_plt",
+    deps = DEPS,
+)
+
+dialyze(
+    dialyzer_opts = RABBITMQ_DIALYZER_OPTS,
+    plt = ":base_plt",
+)
+
+broker_for_integration_suites()
+
+rabbitmq_integration_suite(
+    name = "config_schema_SUITE",
+)
+
+rabbitmq_integration_suite(
+    name = "system_SUITE",
+)
+
+rabbitmq_suite(
+    name = "unit_SUITE",
+    runtime_deps = [
+        "//deps/rabbitmq_ct_helpers:erlang_app",
+    ],
+)
+
+assert_suites()
+
+alias(
+    name = "rabbitmq_event_exchange",
+    actual = ":erlang_app",
+    visibility = ["//visibility:public"],
+)

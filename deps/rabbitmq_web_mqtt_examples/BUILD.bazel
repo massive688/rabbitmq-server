@@ -1,0 +1,54 @@
+load("@rules_erlang//:xref2.bzl", "xref")
+load("@rules_erlang//:dialyze.bzl", "dialyze", "plt")
+load(
+    "//:rabbitmq.bzl",
+    "RABBITMQ_DIALYZER_OPTS",
+    "assert_suites",
+    "rabbitmq_app",
+)
+
+APP_NAME = "rabbitmq_web_mqtt_examples"
+
+APP_DESCRIPTION = "Rabbit WEB-MQTT - examples"
+
+APP_MODULE = "rabbit_web_mqtt_examples_app"
+
+APP_ENV = """[
+	    {listener, [{port, 15670}]}
+	  ]"""
+
+RUNTIME_DEPS = [
+    "//deps/rabbit_common:erlang_app",
+    "//deps/rabbit:erlang_app",
+    "//deps/rabbitmq_web_dispatch:erlang_app",
+    "//deps/rabbitmq_web_mqtt:erlang_app",
+]
+
+rabbitmq_app(
+    app_description = APP_DESCRIPTION,
+    app_env = APP_ENV,
+    app_module = APP_MODULE,
+    app_name = APP_NAME,
+    runtime_deps = RUNTIME_DEPS,
+)
+
+xref()
+
+plt(
+    name = "base_plt",
+    plt = "//:base_plt",
+    deps = RUNTIME_DEPS,
+)
+
+dialyze(
+    dialyzer_opts = RABBITMQ_DIALYZER_OPTS,
+    plt = ":base_plt",
+)
+
+alias(
+    name = "rabbitmq_web_mqtt_examples",
+    actual = ":erlang_app",
+    visibility = ["//visibility:public"],
+)
+
+assert_suites()

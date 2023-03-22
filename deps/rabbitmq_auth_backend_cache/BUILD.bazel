@@ -1,0 +1,82 @@
+load("@rules_erlang//:xref2.bzl", "xref")
+load("@rules_erlang//:dialyze.bzl", "dialyze", "plt")
+load(
+    "//:rabbitmq.bzl",
+    "BROKER_VERSION_REQUIREMENTS_ANY",
+    "RABBITMQ_DIALYZER_OPTS",
+    "assert_suites",
+    "broker_for_integration_suites",
+    "rabbitmq_app",
+    "rabbitmq_integration_suite",
+    "rabbitmq_suite",
+)
+
+APP_ENV = """[
+	    {cache_ttl,      15000},
+	    {cache_module,   rabbit_auth_cache_ets},
+	    {cache_module_args, []},
+	    {cached_backend, rabbit_auth_backend_internal},
+	    {cache_refusals, false}
+	  ]"""
+
+APP_NAME = "rabbitmq_auth_backend_cache"
+
+APP_DESCRIPTION = "RabbitMQ Authentication Backend cache"
+
+APP_MODULE = "rabbit_auth_backend_cache_app"
+
+DEPS = [
+    "//deps/rabbit_common:erlang_app",
+]
+
+RUNTIME_DEPS = [
+    "//deps/rabbit:erlang_app",
+]
+
+rabbitmq_app(
+    app_description = APP_DESCRIPTION,
+    app_env = APP_ENV,
+    app_extra_keys = BROKER_VERSION_REQUIREMENTS_ANY,
+    app_module = APP_MODULE,
+    app_name = APP_NAME,
+    runtime_deps = RUNTIME_DEPS,
+    deps = DEPS,
+)
+
+xref()
+
+plt(
+    name = "base_plt",
+    plt = "//:base_plt",
+    deps = DEPS,
+)
+
+dialyze(
+    dialyzer_opts = RABBITMQ_DIALYZER_OPTS,
+    plt = ":base_plt",
+)
+
+broker_for_integration_suites()
+
+rabbitmq_integration_suite(
+    name = "config_schema_SUITE",
+)
+
+rabbitmq_integration_suite(
+    name = "rabbit_auth_backend_cache_SUITE",
+)
+
+rabbitmq_suite(
+    name = "rabbit_auth_cache_SUITE",
+    runtime_deps = [
+        "//deps/rabbitmq_ct_helpers:erlang_app",
+    ],
+)
+
+assert_suites()
+
+alias(
+    name = "rabbitmq_auth_backend_cache",
+    actual = ":erlang_app",
+    visibility = ["//visibility:public"],
+)

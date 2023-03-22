@@ -1,0 +1,116 @@
+load("@rules_erlang//:xref2.bzl", "xref")
+load("@rules_erlang//:dialyze.bzl", "dialyze", "plt")
+load(
+    "//:rabbitmq.bzl",
+    "BROKER_VERSION_REQUIREMENTS_ANY",
+    "RABBITMQ_DIALYZER_OPTS",
+    "assert_suites",
+    "broker_for_integration_suites",
+    "rabbitmq_app",
+    "rabbitmq_integration_suite",
+    "rabbitmq_suite",
+)
+
+APP_ENV = """[
+	    {rates_mode,        basic},
+	    {sample_retention_policies,
+	     %% List of {MaxAgeInSeconds, SampleEveryNSeconds}
+	     [{global,   [{605, 5}, {3660, 60}, {29400, 600}, {86400, 1800}]},
+	      {basic,    [{605, 5}, {3600, 60}]},
+	      {detailed, [{605, 5}]}]}
+	  ]"""
+
+APP_NAME = "rabbitmq_management_agent"
+
+APP_DESCRIPTION = "RabbitMQ Management Agent"
+
+APP_MODULE = "rabbit_mgmt_agent_app"
+
+EXTRA_APPS = [
+    "xmerl",
+    "mnesia",
+    "ranch",
+    "ssl",
+    "crypto",
+    "public_key",
+]
+
+BUILD_DEPS = [
+    "//deps/rabbitmq_cli:erlang_app",
+]
+
+DEPS = [
+    "//deps/rabbit_common:erlang_app",
+    "//deps/rabbit:erlang_app",
+]
+
+rabbitmq_app(
+    app_description = APP_DESCRIPTION,
+    app_env = APP_ENV,
+    app_extra_keys = BROKER_VERSION_REQUIREMENTS_ANY,
+    app_module = APP_MODULE,
+    app_name = APP_NAME,
+    build_deps = BUILD_DEPS,
+    extra_apps = EXTRA_APPS,
+    deps = DEPS,
+)
+
+xref(
+    additional_libs = BUILD_DEPS,
+)
+
+plt_apps = list(EXTRA_APPS)
+
+plt_apps.remove("ranch")
+
+plt(
+    name = "base_plt",
+    apps = plt_apps,
+    libs = ["//deps/rabbitmq_cli:elixir"],
+    plt = "//:base_plt",
+    deps = ["//deps/rabbitmq_cli:elixir"] + BUILD_DEPS + DEPS,
+)
+
+dialyze(
+    dialyzer_opts = RABBITMQ_DIALYZER_OPTS,
+    plt = ":base_plt",
+)
+
+broker_for_integration_suites()
+
+rabbitmq_suite(
+    name = "exometer_slide_SUITE",
+    size = "medium",
+    deps = [
+        "@proper//:erlang_app",
+    ],
+)
+
+rabbitmq_integration_suite(
+    name = "metrics_SUITE",
+    size = "medium",
+)
+
+rabbitmq_integration_suite(
+    name = "rabbit_mgmt_gc_SUITE",
+    size = "medium",
+)
+
+rabbitmq_suite(
+    name = "rabbit_mgmt_slide_SUITE",
+    size = "small",
+    runtime_deps = [
+        "//deps/rabbitmq_ct_helpers:erlang_app",
+    ],
+    deps = [
+        "@proper//:erlang_app",
+    ],
+)
+
+assert_suites()
+
+alias(
+    name = "rabbitmq_management_agent",
+    actual = ":erlang_app",
+    visibility = ["//visibility:public"],
+)

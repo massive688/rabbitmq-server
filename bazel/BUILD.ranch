@@ -1,0 +1,150 @@
+load("@rules_erlang//:erlang_bytecode2.bzl", "erlang_bytecode", "erlc_opts")
+load("@rules_erlang//:erlang_app.bzl", "erlang_app")
+
+erlc_opts(
+    name = "erlc_opts",
+    values = select({
+        "@rules_erlang//:debug_build": [
+            "+debug_info",
+        ],
+        "//conditions:default": [
+            "+debug_info",
+            "+deterministic",
+        ],
+    }),
+    visibility = [":__subpackages__"],
+)
+
+erlang_bytecode(
+    name = "behaviours",
+    srcs = ["src/ranch_transport.erl"],
+    outs = ["ebin/ranch_transport.beam"],
+    hdrs = [],
+    app_name = "ranch",
+    erlc_opts = "//:erlc_opts",
+)
+
+erlang_bytecode(
+    name = "other_beam",
+    srcs = [
+        "src/ranch.erl",
+        "src/ranch_acceptor.erl",
+        "src/ranch_acceptors_sup.erl",
+        "src/ranch_app.erl",
+        "src/ranch_conns_sup.erl",
+        "src/ranch_conns_sup_sup.erl",
+        "src/ranch_crc32c.erl",
+        "src/ranch_embedded_sup.erl",
+        "src/ranch_listener_sup.erl",
+        "src/ranch_protocol.erl",
+        "src/ranch_proxy_header.erl",
+        "src/ranch_server.erl",
+        "src/ranch_server_proxy.erl",
+        "src/ranch_ssl.erl",
+        "src/ranch_sup.erl",
+        "src/ranch_tcp.erl",
+    ],
+    outs = [
+        "ebin/ranch.beam",
+        "ebin/ranch_acceptor.beam",
+        "ebin/ranch_acceptors_sup.beam",
+        "ebin/ranch_app.beam",
+        "ebin/ranch_conns_sup.beam",
+        "ebin/ranch_conns_sup_sup.beam",
+        "ebin/ranch_crc32c.beam",
+        "ebin/ranch_embedded_sup.beam",
+        "ebin/ranch_listener_sup.beam",
+        "ebin/ranch_protocol.beam",
+        "ebin/ranch_proxy_header.beam",
+        "ebin/ranch_server.beam",
+        "ebin/ranch_server_proxy.beam",
+        "ebin/ranch_ssl.beam",
+        "ebin/ranch_sup.beam",
+        "ebin/ranch_tcp.beam",
+    ],
+    hdrs = [],
+    app_name = "ranch",
+    beam = [":behaviours"],
+    erlc_opts = "//:erlc_opts",
+)
+
+filegroup(
+    name = "beam_files",
+    srcs = [
+        ":behaviours",
+        ":other_beam",
+    ],
+)
+
+filegroup(
+    name = "srcs",
+    srcs = [
+        "src/ranch.erl",
+        "src/ranch_acceptor.erl",
+        "src/ranch_acceptors_sup.erl",
+        "src/ranch_app.erl",
+        "src/ranch_conns_sup.erl",
+        "src/ranch_conns_sup_sup.erl",
+        "src/ranch_crc32c.erl",
+        "src/ranch_embedded_sup.erl",
+        "src/ranch_listener_sup.erl",
+        "src/ranch_protocol.erl",
+        "src/ranch_proxy_header.erl",
+        "src/ranch_server.erl",
+        "src/ranch_server_proxy.erl",
+        "src/ranch_ssl.erl",
+        "src/ranch_sup.erl",
+        "src/ranch_tcp.erl",
+        "src/ranch_transport.erl",
+    ],
+)
+
+filegroup(
+    name = "private_hdrs",
+    srcs = [],
+)
+
+filegroup(
+    name = "public_hdrs",
+    srcs = [],
+)
+
+filegroup(
+    name = "priv",
+    srcs = [],
+)
+
+filegroup(
+    name = "licenses",
+    srcs = ["LICENSE"],
+)
+
+filegroup(
+    name = "public_and_private_hdrs",
+    srcs = [
+        ":private_hdrs",
+        ":public_hdrs",
+    ],
+)
+
+filegroup(
+    name = "all_srcs",
+    srcs = [
+        ":public_and_private_hdrs",
+        ":srcs",
+    ],
+)
+
+erlang_app(
+    name = "erlang_app",
+    srcs = [":all_srcs"],
+    app_name = "ranch",
+    beam_files = [":beam_files"],
+    extra_apps = ["ssl"],
+)
+
+alias(
+    name = "ranch",
+    actual = ":erlang_app",
+    visibility = ["//visibility:public"],
+)

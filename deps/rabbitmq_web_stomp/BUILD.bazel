@@ -1,0 +1,122 @@
+load("@rules_erlang//:xref2.bzl", "xref")
+load("@rules_erlang//:dialyze.bzl", "dialyze", "plt")
+load(
+    "//:rabbitmq.bzl",
+    "BROKER_VERSION_REQUIREMENTS_ANY",
+    "RABBITMQ_DIALYZER_OPTS",
+    "RABBITMQ_TEST_ERLC_OPTS",
+    "assert_suites",
+    "broker_for_integration_suites",
+    "rabbitmq_app",
+    "rabbitmq_integration_suite",
+    "rabbitmq_suite",
+    "rabbitmq_test_helper",
+)
+
+APP_NAME = "rabbitmq_web_stomp"
+
+APP_DESCRIPTION = "RabbitMQ STOMP-over-WebSockets support"
+
+APP_MODULE = "rabbit_web_stomp_app"
+
+APP_ENV = """[
+	    {tcp_config, [{port, 15674}]},
+	    {ssl_config, []},
+	    {num_tcp_acceptors, 10},
+	    {num_ssl_acceptors, 10},
+	    {cowboy_opts, []},
+	    {proxy_protocol, false},
+	    {ws_frame, text},
+	    {use_http_auth, false}
+	  ]"""
+
+BUILD_DEPS = [
+    "//deps/amqp_client:erlang_app",
+    "@ranch//:erlang_app",
+]
+
+DEPS = [
+    "//deps/rabbit_common:erlang_app",
+    "//deps/rabbitmq_stomp:erlang_app",
+    "@cowboy//:erlang_app",
+]
+
+RUNTIME_DEPS = [
+    "//deps/rabbit:erlang_app",
+]
+
+rabbitmq_app(
+    app_description = APP_DESCRIPTION,
+    app_env = APP_ENV,
+    app_extra_keys = BROKER_VERSION_REQUIREMENTS_ANY,
+    app_module = APP_MODULE,
+    app_name = APP_NAME,
+    build_deps = BUILD_DEPS,
+    runtime_deps = RUNTIME_DEPS,
+    deps = DEPS,
+)
+
+xref()
+
+plt(
+    name = "base_plt",
+    plt = "//:base_plt",
+    deps = BUILD_DEPS + DEPS,
+)
+
+dialyze(
+    dialyzer_opts = RABBITMQ_DIALYZER_OPTS,
+    plt = ":base_plt",
+)
+
+broker_for_integration_suites()
+
+rabbitmq_test_helper(
+    name = "test_util",
+    srcs = glob(["test/src/*.erl"]),
+)
+
+rabbitmq_integration_suite(
+    name = "amqp_stomp_SUITE",
+    additional_beam = [
+        ":test_util",
+    ],
+)
+
+rabbitmq_integration_suite(
+    name = "config_schema_SUITE",
+)
+
+rabbitmq_integration_suite(
+    name = "cowboy_websocket_SUITE",
+    additional_beam = [
+        ":test_util",
+    ],
+)
+
+rabbitmq_integration_suite(
+    name = "proxy_protocol_SUITE",
+    additional_beam = [
+        ":test_util",
+    ],
+)
+
+rabbitmq_integration_suite(
+    name = "raw_websocket_SUITE",
+    additional_beam = [
+        ":test_util",
+    ],
+)
+
+rabbitmq_suite(
+    name = "unit_SUITE",
+    size = "small",
+)
+
+assert_suites()
+
+alias(
+    name = "rabbitmq_web_stomp",
+    actual = ":erlang_app",
+    visibility = ["//visibility:public"],
+)

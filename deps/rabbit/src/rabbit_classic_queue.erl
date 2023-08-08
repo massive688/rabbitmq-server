@@ -80,15 +80,15 @@ declare(Q, Node) when ?amqqueue_is_classic(Q) ->
                         _   -> Node
                     end
             end,
-    Node1 = rabbit_mirror_queue_misc:initial_queue_node(Q, Node1),
-    case rabbit_vhost_sup_sup:get_vhost_sup(VHost, Node1) of
+    Node2 = rabbit_mirror_queue_misc:initial_queue_node(Q, Node1),
+    case rabbit_vhost_sup_sup:get_vhost_sup(VHost, Node2) of
         {ok, _} ->
             gen_server2:call(
-              rabbit_amqqueue_sup_sup:start_queue_process(Node1, Q, declare),
+              rabbit_amqqueue_sup_sup:start_queue_process(Node2, Q, declare),
               {init, new}, infinity);
         {error, Error} ->
             {protocol_error, internal_error, "Cannot declare a queue '~ts' on node '~ts': ~255p",
-             [rabbit_misc:rs(QName), Node1, Error]}
+             [rabbit_misc:rs(QName), Node2, Error]}
     end.
 
 delete(Q, IfUnused, IfEmpty, ActingUser) when ?amqqueue_is_classic(Q) ->
@@ -121,9 +121,9 @@ delete(Q, IfUnused, IfEmpty, ActingUser) when ?amqqueue_is_classic(Q) ->
             {ok, 0}
     end.
 
-is_recoverable(Q) when ?is_amqqueue(Q) ->
+is_recoverable(Q) when ?is_amqqueue(Q) and ?amqqueue_is_classic(Q) ->
     Node = node(),
-    Node =:= node(amqqueue:get_pid(Q)) andalso
+    Node =:= amqqueue:qnode(Q) andalso
     %% Terminations on node down will not remove the rabbit_queue
     %% record if it is a mirrored queue (such info is now obtained from
     %% the policy). Thus, we must check if the local pid is alive
@@ -354,19 +354,19 @@ deliver(Qs0, #delivery{flow = Flow,
     delegate:invoke_no_result(SPids, {gen_server2, cast, [SMsg]}),
     {Qs, []}.
 
-
 -spec dequeue(rabbit_amqqueue:name(), NoAck :: boolean(),
               LimiterPid :: pid(), rabbit_types:ctag(), state()) ->
     {ok, Count :: non_neg_integer(), rabbit_amqqueue:qmsg(), state()} |
     {empty, state()}.
-dequeue(_QName, NoAck, LimiterPid, _CTag, State) ->
-    QPid = State#?STATE.pid,
+dequeue(QName, NoAck, LimiterPid, _CTag, State0) ->
+    QPid = State0#?STATE.pid,
+    State1 = ensure_monitor(QPid, QName, State0),
     case delegate:invoke(QPid, {gen_server2, call,
                                 [{basic_get, self(), NoAck, LimiterPid}, infinity]}) of
         empty ->
-            {empty, State};
+            {empty, State1};
         {ok, Count, Msg} ->
-            {ok, Count, Msg, State}
+            {ok, Count, Msg, State1}
     end.
 
 -spec state_info(state()) -> #{atom() := term()}.
@@ -567,10 +567,9 @@ deliver_to_consumer(Pid, QName, CTag, AckRequired, Message) ->
     gen_server:cast(Pid, Evt).
 
 send_drained(Pid, QName, CTagCredits) when is_list(CTagCredits) ->
-    [_ = gen_server:cast(Pid, {queue_event, QName,
-                               {send_drained, CTagCredit}})
-     || CTagCredit <- CTagCredits],
-    ok;
+    lists:foreach(fun(CTagCredit) ->
+                          send_drained(Pid, QName, CTagCredit)
+                  end, CTagCredits);
 send_drained(Pid, QName, CTagCredit) when is_tuple(CTagCredit) ->
     gen_server:cast(Pid, {queue_event, QName,
                           {send_drained, CTagCredit}}).

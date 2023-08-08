@@ -11,24 +11,35 @@
 -include_lib("common_test/include/ct.hrl").
 -include_lib("eunit/include/eunit.hrl").
 
-%% defined in MQTT v4 and v5 (not in v3)
+%% not defined in v3
 -define(SUBACK_FAILURE, 16#80).
+
+-define(RC_DISCONNECT_WITH_WILL, 16#04).
+-define(RC_NOT_AUTHORIZED, 16#87).
+-define(RC_QUOTA_EXCEEDED, 16#97).
 
 -define(FAIL_IF_CRASH_LOG, {["Generic server.*terminating"],
                             fun () -> ct:fail(crash_detected) end}).
--import(rabbit_ct_broker_helpers, [rpc/5]).
+-import(rabbit_ct_broker_helpers,
+        [rpc/5,
+         set_full_permissions/3]).
+-import(rabbit_ct_helpers, [testcase_started/2]).
+-import(util, [non_clean_sess_opts/0]).
 
 all() ->
-    [{group, anonymous_no_ssl_user},
-     {group, anonymous_ssl_user},
-     {group, no_ssl_user},
-     {group, ssl_user},
-     {group, client_id_propagation},
-     {group, authz},
-     {group, limit}].
+    [
+     {group, v4},
+     {group, v5}
+    ].
 
 groups() ->
-    [{anonymous_ssl_user, [],
+    [
+     {v4, [], sub_groups()},
+     {v5, [], sub_groups()}
+    ].
+
+sub_groups() ->
+    [{anonymous_ssl_user, [shuffle],
       [anonymous_auth_success,
        user_credentials_auth,
        ssl_user_auth_success,
@@ -38,7 +49,7 @@ groups() ->
        ssl_user_vhost_parameter_mapping_vhost_does_not_exist,
        ssl_user_port_vhost_mapping_takes_precedence_over_cert_vhost_mapping
       ]},
-     {anonymous_no_ssl_user, [],
+     {anonymous_no_ssl_user, [shuffle],
       [anonymous_auth_success,
        user_credentials_auth,
        port_vhost_mapping_success,
@@ -47,7 +58,7 @@ groups() ->
        port_vhost_mapping_vhost_does_not_exist
        %% SSL auth will succeed, because we cannot ignore anonymous
        ]},
-     {ssl_user, [],
+     {ssl_user, [shuffle],
       [anonymous_auth_failure,
        user_credentials_auth,
        ssl_user_auth_success,
@@ -57,7 +68,7 @@ groups() ->
        ssl_user_vhost_parameter_mapping_vhost_does_not_exist,
        ssl_user_port_vhost_mapping_takes_precedence_over_cert_vhost_mapping
       ]},
-     {no_ssl_user, [],
+     {no_ssl_user, [shuffle],
       [anonymous_auth_failure,
        user_credentials_auth,
        ssl_user_auth_failure,
@@ -66,25 +77,30 @@ groups() ->
        port_vhost_mapping_not_allowed,
        port_vhost_mapping_vhost_does_not_exist
      ]},
-     {client_id_propagation, [],
+     {client_id_propagation, [shuffle],
       [client_id_propagation]
      },
      {authz, [],
-      [no_queue_bind_permission,
-       no_queue_unbind_permission,
-       no_queue_consume_permission,
-       no_queue_consume_permission_on_connect,
-       no_queue_delete_permission,
-       no_queue_declare_permission,
-       no_publish_permission,
-       no_publish_permission_will_message,
-       no_topic_read_permission,
-       no_topic_write_permission,
+      [queue_bind_permission,
+       queue_unbind_permission,
+       queue_consume_permission,
+       queue_consume_permission_on_connect,
+       subscription_queue_delete_permission,
+       will_queue_create_permission_queue_read,
+       will_queue_create_permission_exchange_write,
+       will_queue_publish_permission_exchange_write,
+       will_queue_publish_permission_topic_write,
+       will_queue_delete_permission,
+       queue_declare_permission,
+       publish_permission,
+       publish_permission_will_message,
+       topic_read_permission,
+       topic_write_permission,
        topic_write_permission_variable_expansion,
        loopback_user_connects_from_remote_host
       ]
      },
-     {limit, [],
+     {limit, [shuffle],
       [vhost_connection_limit,
        vhost_queue_limit,
        user_connection_limit
@@ -98,6 +114,10 @@ init_per_suite(Config) ->
 end_per_suite(Config) ->
     Config.
 
+init_per_group(G, Config)
+  when G =:= v4;
+       G =:= v5 ->
+    rabbit_ct_helpers:set_config(Config, {mqtt_version, G});
 init_per_group(authz, Config0) ->
     User = <<"mqtt-user">>,
     Password = <<"mqtt-password">>,
@@ -114,7 +134,12 @@ init_per_group(authz, Config0) ->
     rabbit_ct_broker_helpers:add_user(Config1, User, Password),
     rabbit_ct_broker_helpers:add_vhost(Config1, VHost),
     [Log|_] = rpc(Config1, 0, rabbit, log_locations, []),
-    [{mqtt_user, User}, {mqtt_vhost, VHost}, {mqtt_password, Password}, {log_location, Log}|Config1];
+    Config2 = [{mqtt_user, User},
+               {mqtt_vhost, VHost},
+               {mqtt_password, Password},
+               {log_location, Log} | Config1],
+    ok = rabbit_ct_broker_helpers:enable_feature_flag(Config2, mqtt_v5),
+    Config2;
 init_per_group(Group, Config) ->
     Suffix = rabbit_ct_helpers:testcase_absname(Config, "", "-"),
     Config1 = rabbit_ct_helpers:set_config(Config, [
@@ -123,20 +148,27 @@ init_per_group(Group, Config) ->
     ]),
     MqttConfig = mqtt_config(Group),
     AuthConfig = auth_config(Group),
-    rabbit_ct_helpers:run_setup_steps(Config1,
-        [ fun(Conf) -> case MqttConfig of
-                           undefined  -> Conf;
-                           _          -> merge_app_env(MqttConfig, Conf)
-                       end
-          end] ++
-        [ fun(Conf) -> case AuthConfig of
-                            undefined -> Conf;
-                            _         -> merge_app_env(AuthConfig, Conf)
-                       end
-          end ] ++
-        rabbit_ct_broker_helpers:setup_steps() ++
-        rabbit_ct_client_helpers:setup_steps()).
+    Config2 = rabbit_ct_helpers:run_setup_steps(
+                Config1,
+                [fun(Conf) -> case MqttConfig of
+                                  undefined  -> Conf;
+                                  _          -> merge_app_env(MqttConfig, Conf)
+                              end
+                 end] ++
+                [fun(Conf) -> case AuthConfig of
+                                  undefined -> Conf;
+                                  _         -> merge_app_env(AuthConfig, Conf)
+                              end
+                 end] ++
+                rabbit_ct_broker_helpers:setup_steps() ++
+                rabbit_ct_client_helpers:setup_steps()),
+    ok = rabbit_ct_broker_helpers:enable_feature_flag(Config2, mqtt_v5),
+    Config2.
 
+end_per_group(G, Config)
+  when G =:= v4;
+       G =:= v5 ->
+    Config;
 end_per_group(_, Config) ->
     rabbit_ct_helpers:run_teardown_steps(Config,
       rabbit_ct_client_helpers:teardown_steps() ++
@@ -171,49 +203,49 @@ auth_config(client_id_propagation) ->
 auth_config(_) ->
     undefined.
 
-init_per_testcase(Testcase, Config) when Testcase == ssl_user_auth_success;
-                                         Testcase == ssl_user_auth_failure ->
+init_per_testcase(T, Config) when T == ssl_user_auth_success;
+                                  T == ssl_user_auth_failure ->
     Config1 = set_cert_user_on_default_vhost(Config),
-    rabbit_ct_helpers:testcase_started(Config1, Testcase);
-init_per_testcase(ssl_user_vhost_parameter_mapping_success, Config) ->
+    testcase_started(Config1, T);
+init_per_testcase(T = ssl_user_vhost_parameter_mapping_success, Config) ->
     Config1 = set_cert_user_on_default_vhost(Config),
     User = ?config(temp_ssl_user, Config1),
     ok = rabbit_ct_broker_helpers:clear_permissions(Config1, User, <<"/">>),
     Config2 = set_vhost_for_cert_user(Config1, User),
-    rabbit_ct_helpers:testcase_started(Config2, ssl_user_vhost_parameter_mapping_success);
-init_per_testcase(ssl_user_vhost_parameter_mapping_not_allowed, Config) ->
+    testcase_started(Config2, T);
+init_per_testcase(T = ssl_user_vhost_parameter_mapping_not_allowed, Config) ->
     Config1 = set_cert_user_on_default_vhost(Config),
     User = ?config(temp_ssl_user, Config1),
     Config2 = set_vhost_for_cert_user(Config1, User),
     VhostForCertUser = ?config(temp_vhost_for_ssl_user, Config2),
     ok = rabbit_ct_broker_helpers:clear_permissions(Config2, User, VhostForCertUser),
-    rabbit_ct_helpers:testcase_started(Config2, ssl_user_vhost_parameter_mapping_not_allowed);
-init_per_testcase(user_credentials_auth, Config) ->
+    testcase_started(Config2, T);
+init_per_testcase(T = user_credentials_auth, Config) ->
     User = <<"new-user">>,
     Pass = <<"new-user-pass">>,
     ok = rabbit_ct_broker_helpers:add_user(Config, 0, User, Pass),
-    ok = rabbit_ct_broker_helpers:set_full_permissions(Config, User, <<"/">>),
+    ok = set_full_permissions(Config, User, <<"/">>),
     Config1 = rabbit_ct_helpers:set_config(Config, [{new_user, User},
                                                     {new_user_pass, Pass}]),
-    rabbit_ct_helpers:testcase_started(Config1, user_credentials_auth);
-init_per_testcase(ssl_user_vhost_not_allowed, Config) ->
+    testcase_started(Config1, T);
+init_per_testcase(T = ssl_user_vhost_not_allowed, Config) ->
     Config1 = set_cert_user_on_default_vhost(Config),
     User = ?config(temp_ssl_user, Config1),
     ok = rabbit_ct_broker_helpers:clear_permissions(Config1, User, <<"/">>),
-    rabbit_ct_helpers:testcase_started(Config1, ssl_user_vhost_not_allowed);
-init_per_testcase(ssl_user_vhost_parameter_mapping_vhost_does_not_exist, Config) ->
+    testcase_started(Config1, T);
+init_per_testcase(T = ssl_user_vhost_parameter_mapping_vhost_does_not_exist, Config) ->
     Config1 = set_cert_user_on_default_vhost(Config),
     User = ?config(temp_ssl_user, Config1),
     Config2 = set_vhost_for_cert_user(Config1, User),
     VhostForCertUser = ?config(temp_vhost_for_ssl_user, Config2),
     ok = rabbit_ct_broker_helpers:delete_vhost(Config, VhostForCertUser),
-    rabbit_ct_helpers:testcase_started(Config1, ssl_user_vhost_parameter_mapping_vhost_does_not_exist);
-init_per_testcase(port_vhost_mapping_success, Config) ->
+    testcase_started(Config1, T);
+init_per_testcase(T = port_vhost_mapping_success, Config) ->
     User = <<"guest">>,
     Config1 = set_vhost_for_port_vhost_mapping_user(Config, User),
     rabbit_ct_broker_helpers:clear_permissions(Config1, User, <<"/">>),
-    rabbit_ct_helpers:testcase_started(Config1, port_vhost_mapping_success);
-init_per_testcase(port_vhost_mapping_success_no_mapping, Config) ->
+    testcase_started(Config1, T);
+init_per_testcase(T = port_vhost_mapping_success_no_mapping, Config) ->
     User = <<"guest">>,
     Config1 = set_vhost_for_port_vhost_mapping_user(Config, User),
     PortToVHostMappingParameter = [
@@ -222,22 +254,22 @@ init_per_testcase(port_vhost_mapping_success_no_mapping, Config) ->
     ok = rabbit_ct_broker_helpers:set_global_parameter(Config, mqtt_port_to_vhost_mapping, PortToVHostMappingParameter),
     VHost = ?config(temp_vhost_for_port_mapping, Config1),
     rabbit_ct_broker_helpers:clear_permissions(Config1, User, VHost),
-    rabbit_ct_helpers:testcase_started(Config1, port_vhost_mapping_success_no_mapping);
-init_per_testcase(port_vhost_mapping_not_allowed, Config) ->
+    testcase_started(Config1, T);
+init_per_testcase(T = port_vhost_mapping_not_allowed, Config) ->
     User = <<"guest">>,
     Config1 = set_vhost_for_port_vhost_mapping_user(Config, User),
     rabbit_ct_broker_helpers:clear_permissions(Config1, User, <<"/">>),
     VHost = ?config(temp_vhost_for_port_mapping, Config1),
     rabbit_ct_broker_helpers:clear_permissions(Config1, User, VHost),
-    rabbit_ct_helpers:testcase_started(Config1, port_vhost_mapping_not_allowed);
-init_per_testcase(port_vhost_mapping_vhost_does_not_exist, Config) ->
+    testcase_started(Config1, T);
+init_per_testcase(T = port_vhost_mapping_vhost_does_not_exist, Config) ->
     User = <<"guest">>,
     Config1 = set_vhost_for_port_vhost_mapping_user(Config, User),
     rabbit_ct_broker_helpers:clear_permissions(Config1, User, <<"/">>),
     VHost = ?config(temp_vhost_for_port_mapping, Config1),
     rabbit_ct_broker_helpers:delete_vhost(Config1, VHost),
-    rabbit_ct_helpers:testcase_started(Config1, port_vhost_mapping_vhost_does_not_exist);
-init_per_testcase(ssl_user_port_vhost_mapping_takes_precedence_over_cert_vhost_mapping, Config) ->
+    testcase_started(Config1, T);
+init_per_testcase(T = ssl_user_port_vhost_mapping_takes_precedence_over_cert_vhost_mapping, Config) ->
     Config1 = set_cert_user_on_default_vhost(Config),
     User = ?config(temp_ssl_user, Config1),
     Config2 = set_vhost_for_cert_user(Config1, User),
@@ -247,9 +279,18 @@ init_per_testcase(ssl_user_port_vhost_mapping_takes_precedence_over_cert_vhost_m
     rabbit_ct_broker_helpers:clear_permissions(Config3, User, VhostForPortMapping),
 
     rabbit_ct_broker_helpers:clear_permissions(Config3, User, <<"/">>),
-    rabbit_ct_helpers:testcase_started(Config3, ssl_user_port_vhost_mapping_takes_precedence_over_cert_vhost_mapping);
+    testcase_started(Config3, T);
+init_per_testcase(T, Config)
+  when T =:= will_queue_create_permission_queue_read;
+       T =:= will_queue_create_permission_exchange_write;
+       T =:= will_queue_publish_permission_exchange_write;
+       T =:= will_queue_publish_permission_topic_write ->
+    case ?config(mqtt_version, Config) of
+        v4 -> {skip, "Will Delay Interval is an MQTT 5.0 feature"};
+        v5 -> testcase_started(Config, T)
+    end;
 init_per_testcase(Testcase, Config) ->
-    rabbit_ct_helpers:testcase_started(Config, Testcase).
+    testcase_started(Config, Testcase).
 
 set_cert_user_on_default_vhost(Config) ->
     CertsDir = ?config(rmq_certsdir, Config),
@@ -259,7 +300,7 @@ set_cert_user_on_default_vhost(Config) ->
     UserBin = rpc(Config, 0, rabbit_ssl, peer_cert_auth_name, [Cert]),
     User = binary_to_list(UserBin),
     ok = rabbit_ct_broker_helpers:add_user(Config, 0, User, ""),
-    ok = rabbit_ct_broker_helpers:set_full_permissions(Config, User, <<"/">>),
+    ok = set_full_permissions(Config, User, <<"/">>),
     rabbit_ct_helpers:set_config(Config, [{temp_ssl_user, User}]).
 
 set_vhost_for_cert_user(Config, User) ->
@@ -269,7 +310,7 @@ set_vhost_for_cert_user(Config, User) ->
         {<<"O=client,CN=unlikelytoexistuser">>, <<"vhost2">>}
     ],
     ok = rabbit_ct_broker_helpers:add_vhost(Config, VhostForCertUser),
-    ok = rabbit_ct_broker_helpers:set_full_permissions(Config, User, VhostForCertUser),
+    ok = set_full_permissions(Config, User, VhostForCertUser),
     ok = rabbit_ct_broker_helpers:set_global_parameter(Config, mqtt_default_vhosts, UserToVHostMappingParameter),
     rabbit_ct_helpers:set_config(Config, [{temp_vhost_for_ssl_user, VhostForCertUser}]).
 
@@ -285,7 +326,7 @@ set_vhost_for_port_vhost_mapping_user(Config, User) ->
 
     ],
     ok = rabbit_ct_broker_helpers:add_vhost(Config, VhostForPortMapping),
-    ok = rabbit_ct_broker_helpers:set_full_permissions(Config, User, VhostForPortMapping),
+    ok = set_full_permissions(Config, User, VhostForPortMapping),
     ok = rabbit_ct_broker_helpers:set_global_parameter(Config, mqtt_port_to_vhost_mapping, PortToVHostMappingParameter),
     rabbit_ct_helpers:set_config(Config, [{temp_vhost_for_port_mapping, VhostForPortMapping}]).
 
@@ -313,14 +354,14 @@ end_per_testcase(Testcase, Config) when Testcase == port_vhost_mapping_success;
                                         Testcase == port_vhost_mapping_not_allowed;
                                         Testcase == port_vhost_mapping_success_no_mapping ->
     User = <<"guest">>,
-    rabbit_ct_broker_helpers:set_full_permissions(Config, User, <<"/">>),
+    ok = set_full_permissions(Config, User, <<"/">>),
     VHost = ?config(temp_vhost_for_port_mapping, Config),
     ok = rabbit_ct_broker_helpers:delete_vhost(Config, VHost),
     ok = rabbit_ct_broker_helpers:clear_global_parameter(Config, mqtt_port_to_vhost_mapping),
     rabbit_ct_helpers:testcase_finished(Config, Testcase);
 end_per_testcase(port_vhost_mapping_vhost_does_not_exist, Config) ->
     User = <<"guest">>,
-    ok = rabbit_ct_broker_helpers:set_full_permissions(Config, User, <<"/">>),
+    ok = set_full_permissions(Config, User, <<"/">>),
     ok = rabbit_ct_broker_helpers:clear_global_parameter(Config, mqtt_port_to_vhost_mapping),
     rabbit_ct_helpers:testcase_finished(Config, port_vhost_mapping_vhost_does_not_exist);
 end_per_testcase(ssl_user_port_vhost_mapping_takes_precedence_over_cert_vhost_mapping, Config) ->
@@ -333,30 +374,33 @@ end_per_testcase(ssl_user_port_vhost_mapping_takes_precedence_over_cert_vhost_ma
     ok = rabbit_ct_broker_helpers:delete_vhost(Config, VHostForPortVHostMapping),
     ok = rabbit_ct_broker_helpers:clear_global_parameter(Config, mqtt_port_to_vhost_mapping),
     rabbit_ct_helpers:testcase_finished(Config, ssl_user_port_vhost_mapping_takes_precedence_over_cert_vhost_mapping);
-end_per_testcase(Testcase, Config) when Testcase == no_queue_bind_permission;
-                                        Testcase == no_queue_unbind_permission;
-                                        Testcase == no_queue_consume_permission;
-                                        Testcase == no_queue_consume_permission_on_connect;
-                                        Testcase == no_queue_delete_permission;
-                                        Testcase == no_queue_declare_permission;
-                                        Testcase == no_publish_permission;
-                                        Testcase == no_publish_permission_will_message;
-                                        Testcase == no_topic_read_permission;
-                                        Testcase == no_topic_write_permission;
-                                        Testcase == topic_write_permission_variable_expansion;
-                                        Testcase == loopback_user_connects_from_remote_host ->
+end_per_testcase(T, Config) when T == queue_bind_permission;
+                                 T == queue_unbind_permission;
+                                 T == queue_consume_permission;
+                                 T == queue_consume_permission_on_connect;
+                                 T == subscription_queue_delete_permission;
+                                 T == will_queue_create_permission_queue_read,
+                                 T == will_queue_create_permission_exchange_write,
+                                 T == will_queue_delete_permission;
+                                 T == queue_declare_permission;
+                                 T == publish_permission;
+                                 T == publish_permission_will_message;
+                                 T == topic_read_permission;
+                                 T == topic_write_permission;
+                                 T == topic_write_permission_variable_expansion;
+                                 T == loopback_user_connects_from_remote_host ->
     %% So let's wait before logs are surely flushed
     Marker = "MQTT_AUTH_SUITE_MARKER",
     rpc(Config, 0, rabbit_log, error, [Marker]),
     wait_log(Config, [{[Marker], fun () -> stop end}]),
 
     %% Preserve file contents in case some investigation is needed, before truncating.
-    file:copy(?config(log_location, Config), iolist_to_binary([?config(log_location, Config), ".", atom_to_binary(Testcase)])),
+    file:copy(?config(log_location, Config), iolist_to_binary([?config(log_location, Config), ".", atom_to_binary(T)])),
 
     %% And provide an empty log file for the next test in this group
     file:write_file(?config(log_location, Config), <<>>),
 
-    rabbit_ct_helpers:testcase_finished(Config, Testcase);
+    rabbit_ct_helpers:testcase_finished(Config, T);
 end_per_testcase(Testcase, Config) ->
     rabbit_ct_helpers:testcase_finished(Config, Testcase).
 
@@ -457,7 +501,7 @@ connect_anonymous(Config, ClientId) ->
     emqtt:start_link([{host, "localhost"},
                       {port, P},
                       {clientid, ClientId},
-                      {proto_ver, v4}]).
+                      {proto_ver, ?config(mqtt_version, Config)}]).
 
 connect_ssl(Config) ->
     CertsDir = ?config(rmq_certsdir, Config),
@@ -468,7 +512,7 @@ connect_ssl(Config) ->
     emqtt:start_link([{host, "localhost"},
                       {port, P},
                       {clientid, <<"simpleClient">>},
-                      {proto_ver, v4},
+                      {proto_ver, ?config(mqtt_version, Config)},
                       {ssl, true},
                       {ssl_opts, SSLConfig}]).
 
@@ -532,79 +576,81 @@ client_id_propagation(Config) ->
 %% is an additional wait in the corresponding end_per_testcase that
 %% ensures that logs for the current testcase were completely
 %% flushed, and won't contaminate following tests from this group.
-no_queue_bind_permission(Config) ->
+queue_bind_permission(Config) ->
     ExpectedLogs =
     ["MQTT resource access refused: write access to queue "
      "'mqtt-subscription-mqtt-userqos0' in vhost 'mqtt-vhost' "
      "refused for user 'mqtt-user'",
      "Failed to add binding between exchange 'amq.topic' in vhost 'mqtt-vhost' and queue "
-     "'mqtt-subscription-mqtt-userqos0' in vhost 'mqtt-vhost' for topic test/topic: access_refused"
+     "'mqtt-subscription-mqtt-userqos0' in vhost 'mqtt-vhost' for topic filter test/topic: access_refused"
     ],
     test_subscribe_permissions_combination(<<".*">>, <<"">>, <<".*">>, Config, ExpectedLogs).
 
-no_queue_unbind_permission(Config) ->
+queue_unbind_permission(Config) ->
     User = ?config(mqtt_user, Config),
     Vhost = ?config(mqtt_vhost, Config),
-    rabbit_ct_broker_helpers:set_permissions(Config, User, Vhost, <<".*">>, <<".*">>, <<".*">>),
+    set_full_permissions(Config, User, Vhost),
     P = rabbit_ct_broker_helpers:get_node_config(Config, 0, tcp_port_mqtt),
     Opts = [{host, "localhost"},
             {port, P},
-            {proto_ver, v4},
+            {proto_ver, ?config(mqtt_version, Config)},
             {clientid, User},
             {username, User},
             {password, ?config(mqtt_password, Config)}],
-    {ok, C1} = emqtt:start_link([{clean_start, false} | Opts]),
+    {ok, C1} = emqtt:start_link(non_clean_sess_opts() ++ Opts),
     {ok, _} = emqtt:connect(C1),
     Topic = <<"my/topic">>,
     ?assertMatch({ok, _Properties, [1]},
                  emqtt:subscribe(C1, Topic, qos1)),
     ok = emqtt:disconnect(C1),
 
-    %% Revoke read access to amq.topic exchange.
-    rabbit_ct_broker_helpers:set_permissions(Config, User, Vhost, <<".*">>, <<".*">>, <<"^(?!amq\.topic$)">>),
-    {ok, C2} = emqtt:start_link([{clean_start, false} | Opts]),
+    %% Revoke write access to qos1 queue.
+    rabbit_ct_broker_helpers:set_permissions(Config, User, Vhost, <<".*">>, <<"mqtt-subscription-mqtt-userqos0">>, <<".*">>),
+    {ok, C2} = emqtt:start_link(non_clean_sess_opts() ++ Opts),
     {ok, _} = emqtt:connect(C2),
     process_flag(trap_exit, true),
     %% We subscribe with the same client ID to the same topic again, but this time with QoS 0.
     %% Therefore we trigger the qos1 queue to be unbound (and the qos0 queue to be bound).
-    %% However, unbinding requires read access to the exchange, which we don't have anymore.
-    ?assertMatch({ok, _Properties, [?SUBACK_FAILURE]},
+    %% However, unbinding requires write access to the qos1 queue, which we don't have anymore.
+    ExpectedReasonCode = suback_error_code(?RC_NOT_AUTHORIZED, Config),
+    ?assertMatch({ok, _Properties, [ExpectedReasonCode]},
                  emqtt:subscribe(C2, Topic, qos0)),
     ok = assert_connection_closed(C2),
     ExpectedLogs =
-    ["MQTT resource access refused: read access to exchange 'amq.topic' in vhost 'mqtt-vhost' refused for user 'mqtt-user'",
+    ["MQTT resource access refused: write access to queue 'mqtt-subscription-mqtt-userqos1' "
+     "in vhost 'mqtt-vhost' refused for user 'mqtt-user'",
      "Failed to remove binding between exchange 'amq.topic' in vhost 'mqtt-vhost' and queue "
-     "'mqtt-subscription-mqtt-userqos1' in vhost 'mqtt-vhost' for topic my/topic: access_refused"
+     "'mqtt-subscription-mqtt-userqos1' in vhost 'mqtt-vhost' for topic filter my/topic: access_refused"
     ],
     wait_log(Config, [?FAIL_IF_CRASH_LOG, {ExpectedLogs, fun () -> stop end}]),
 
     %% Clean up the qos1 queue by connecting with clean session.
-    rabbit_ct_broker_helpers:set_permissions(Config, User, Vhost, <<".*">>, <<".*">>, <<".*">>),
+    set_full_permissions(Config, User, Vhost),
     {ok, C3} = emqtt:start_link([{clean_start, true} | Opts]),
     {ok, _} = emqtt:connect(C3),
     ok = emqtt:disconnect(C3).
 
-no_queue_consume_permission(Config) ->
+queue_consume_permission(Config) ->
     ExpectedLogs =
     ["MQTT resource access refused: read access to queue "
      "'mqtt-subscription-mqtt-userqos0' in vhost 'mqtt-vhost' "
      "refused for user 'mqtt-user'"],
     test_subscribe_permissions_combination(<<".*">>, <<".*">>, <<"^amq\\.topic">>, Config, ExpectedLogs).
 
-no_queue_delete_permission(Config) ->
+subscription_queue_delete_permission(Config) ->
     set_permissions(".*", ".*", ".*", Config),
-    ClientId = <<"no_queue_delete_permission">>,
+    ClientId = atom_to_binary(?FUNCTION_NAME),
     {ok, C1} = connect_user(
                  ?config(mqtt_user, Config),
                  ?config(mqtt_password, Config),
                  Config,
                  ClientId,
-                 [{clean_start, false}]),
+                 non_clean_sess_opts()),
     {ok, _} = emqtt:connect(C1),
     {ok, _, _} = emqtt:subscribe(C1, {<<"test/topic">>, qos1}),
     ok = emqtt:disconnect(C1),
 
-    set_permissions(<<>>, ".*", ".*", Config),
+    set_permissions(<<"^mqtt-will-">>, ".*", ".*", Config),
     %% Now we have a durable queue that user doesn't have permission to delete.
     %% Attempt to establish clean session should fail.
     {ok, C2} = connect_user(
@@ -622,20 +668,121 @@ no_queue_delete_permission(Config) ->
        ,{[io_lib:format("MQTT resource access refused: configure access to queue "
                         "'mqtt-subscription-~sqos1' in vhost 'mqtt-vhost' refused for user 'mqtt-user'",
                         [ClientId]),
-          "Rejected MQTT connection .* with CONNACK return code 5"],
+          "Rejected MQTT connection .* with Connect Reason Code 135"],
          fun() -> stop end}
       ]),
     ok.
 
-no_queue_consume_permission_on_connect(Config) ->
+%% queue.declare with DLX requires permission to read from queue
+will_queue_create_permission_queue_read(Config) ->
+    set_permissions(<<".*">>, ".*", <<>>, Config),
+    ClientId = atom_to_binary(?FUNCTION_NAME),
+    disconnect_with_delayed_will(ClientId, Config),
+    wait_log(
+      Config,
+      [?FAIL_IF_CRASH_LOG
+       ,{[io_lib:format("MQTT resource access refused: read access to queue "
+                        "'mqtt-will-~s' in vhost 'mqtt-vhost' refused for user 'mqtt-user'",
+                        [ClientId]),
+          "failed to schedule delayed Will Message"],
+         fun() -> stop end}
+      ]),
+    ok.
+
+%% queue.declare with DLX requires permission to write to DLX exchange
+will_queue_create_permission_exchange_write(Config) ->
+    set_permissions(<<".*">>, <<>>, <<".*">>, Config),
+    ClientId = atom_to_binary(?FUNCTION_NAME),
+    disconnect_with_delayed_will(ClientId, Config),
+    wait_log(
+      Config,
+      [?FAIL_IF_CRASH_LOG
+       ,{["MQTT resource access refused: write access to exchange "
+          "'amq.topic' in vhost 'mqtt-vhost' refused for user 'mqtt-user'",
+          "failed to schedule delayed Will Message"],
+         fun() -> stop end}
+      ]),
+    ok.
+
+will_queue_publish_permission_exchange_write(Config) ->
+    set_permissions(<<".*">>, <<"amq.topic">>, <<".*">>, Config),
+    ClientId = atom_to_binary(?FUNCTION_NAME),
+    disconnect_with_delayed_will(ClientId, Config),
+    wait_log(
+      Config,
+      [?FAIL_IF_CRASH_LOG
+       ,{["MQTT resource access refused: write access to exchange "
+          "'amq.default' in vhost 'mqtt-vhost' refused for user 'mqtt-user'",
+          "failed to schedule delayed Will Message"],
+         fun() -> stop end}
+      ]),
+    ok.
+
+%% Dead lettering to a topic exchange requires writing to the topic.
+will_queue_publish_permission_topic_write(Config) ->
     set_permissions(".*", ".*", ".*", Config),
-    ClientId = <<"no_queue_consume_permission_on_connect">>,
-    {ok, C1} = connect_user(
+    set_topic_permissions("", ".*", Config),
+    ClientId = atom_to_binary(?FUNCTION_NAME),
+    disconnect_with_delayed_will(ClientId, Config),
+    wait_log(
+      Config,
+      [?FAIL_IF_CRASH_LOG
+       ,{["MQTT topic access refused: write access to topic 'my.topic' in exchange "
+          "'amq.topic' in vhost 'mqtt-vhost' refused for user 'mqtt-user'",
+          "failed to schedule delayed Will Message"],
+         fun() -> stop end}
+      ]),
+    ok.
+
+will_queue_delete_permission(Config) ->
+    set_permissions(".*", ".*", ".*", Config),
+    ClientId = atom_to_binary(?FUNCTION_NAME),
+    disconnect_with_delayed_will(ClientId, Config),
+    set_permissions(<<>>, ".*", ".*", Config),
+    %% Now we have a Will queue that user doesn't have permission to delete.
+    %% Resuming the session should fail.
+    {ok, C2} = connect_user(
                  ?config(mqtt_user, Config),
                  ?config(mqtt_password, Config),
                  Config,
                  ClientId,
                  [{clean_start, false}]),
+    unlink(C2),
+    ?assertMatch({error, _}, emqtt:connect(C2)),
+    wait_log(
+      Config,
+      [?FAIL_IF_CRASH_LOG
+       ,{[io_lib:format("MQTT resource access refused: configure access to queue "
+                        "'mqtt-will-~s' in vhost 'mqtt-vhost' refused for user 'mqtt-user'",
+                        [ClientId]),
+          "Rejected MQTT connection .* with Connect Reason Code 135"],
+         fun() -> stop end}
+      ]),
+    ok.
+
+disconnect_with_delayed_will(ClientId, Config) ->
+    {ok, C} = connect_user(
+                ?config(mqtt_user, Config),
+                ?config(mqtt_password, Config),
+                Config,
+                ClientId,
+                non_clean_sess_opts() ++
+                [{properties, #{'Session-Expiry-Interval' => 3}},
+                 {will_props, #{'Will-Delay-Interval' => 3}},
+                 {will_topic, <<"my/topic">>},
+                 {will_payload, <<"msg">>}]),
+    {ok, _} = emqtt:connect(C),
+    ok = emqtt:disconnect(C, ?RC_DISCONNECT_WITH_WILL).
+
+queue_consume_permission_on_connect(Config) ->
+    set_permissions(".*", ".*", ".*", Config),
+    ClientId = <<"queue_consume_permission_on_connect">>,
+    {ok, C1} = connect_user(
+                 ?config(mqtt_user, Config),
+                 ?config(mqtt_password, Config),
+                 Config,
+                 ClientId,
+                 non_clean_sess_opts()),
     {ok, _} = emqtt:connect(C1),
     {ok, _, _} = emqtt:subscribe(C1, {<<"test/topic">>, qos1}),
     ok = emqtt:disconnect(C1),
@@ -646,7 +793,7 @@ no_queue_consume_permission_on_connect(Config) ->
                  ?config(mqtt_password, Config),
                  Config,
                  ClientId,
-                 [{clean_start, false}]),
+                 non_clean_sess_opts()),
     unlink(C2),
     ?assertMatch({error, _},
                  emqtt:connect(C2)),
@@ -656,14 +803,14 @@ no_queue_consume_permission_on_connect(Config) ->
        ,{[io_lib:format("MQTT resource access refused: read access to queue "
                         "'mqtt-subscription-~sqos1' in vhost 'mqtt-vhost' refused for user 'mqtt-user'",
                         [ClientId]),
-          "Rejected MQTT connection .* with CONNACK return code 5"],
+          "Rejected MQTT connection .* with Connect Reason Code 135"],
          fun () -> stop end}
       ]),
     ok.
 
-no_queue_declare_permission(Config) ->
-    set_permissions("", ".*", ".*", Config),
-    ClientId = <<"no_queue_declare_permission">>,
+queue_declare_permission(Config) ->
+    set_permissions("^mqtt-will-", ".*", ".*", Config),
+    ClientId = atom_to_binary(?FUNCTION_NAME),
     {ok, C} = connect_user(
                 ?config(mqtt_user, Config),
                 ?config(mqtt_password, Config),
@@ -673,7 +820,9 @@ no_queue_declare_permission(Config) ->
     {ok, _} = emqtt:connect(C),
 
     process_flag(trap_exit, true),
-    {ok, _, [?SUBACK_FAILURE]} = emqtt:subscribe(C, <<"test/topic">>, qos0),
+
+    ExpectedReasonCode = suback_error_code(?RC_NOT_AUTHORIZED, Config),
+    {ok, _, [ExpectedReasonCode]} = emqtt:subscribe(C, <<"test/topic">>, qos0),
     ok = assert_connection_closed(C),
     wait_log(
       Config,
@@ -686,7 +835,7 @@ no_queue_declare_permission(Config) ->
       ]),
     ok.
 
-no_publish_permission(Config) ->
+publish_permission(Config) ->
     set_permissions(".*", "", ".*", Config),
     C = open_mqtt_connection(Config),
     process_flag(trap_exit, true),
@@ -702,7 +851,7 @@ no_publish_permission(Config) ->
     ok.
 
 %% Test that publish permission checks are performed for the will message.
-no_publish_permission_will_message(Config) ->
+publish_permission_will_message(Config) ->
     %% Allow write access to queue.
     %% Disallow write access to exchange.
     set_permissions(".*", "^mqtt-subscription.*qos1$", ".*", Config),
@@ -738,7 +887,7 @@ no_publish_permission_will_message(Config) ->
              ]),
     ok = emqtt:disconnect(Sub).
 
-no_topic_read_permission(Config) ->
+topic_read_permission(Config) ->
     set_permissions(".*", ".*", ".*", Config),
     set_topic_permissions("^allow-write\\..*", "^allow-read\\..*", Config),
     C = open_mqtt_connection(Config),
@@ -747,20 +896,22 @@ no_topic_read_permission(Config) ->
     {ok, _, [0]} = emqtt:subscribe(C, <<"allow-read/some/topic">>),
 
     process_flag(trap_exit, true),
-    {ok, _, [?SUBACK_FAILURE]} = emqtt:subscribe(C, <<"test/topic">>),
+
+    ExpectedReasonCode = suback_error_code(?RC_NOT_AUTHORIZED, Config),
+    {ok, _, [ExpectedReasonCode]} = emqtt:subscribe(C, <<"test/topic">>),
     ok = assert_connection_closed(C),
     wait_log(Config,
              [?FAIL_IF_CRASH_LOG,
               {["MQTT topic access refused: read access to topic 'test.topic' in exchange "
                 "'amq.topic' in vhost 'mqtt-vhost' refused for user 'mqtt-user'",
                 "Failed to add binding between exchange 'amq.topic' in vhost 'mqtt-vhost' and queue "
-                "'mqtt-subscription-mqtt-userqos0' in vhost 'mqtt-vhost' for topic test/topic: access_refused"
+                "'mqtt-subscription-mqtt-userqos0' in vhost 'mqtt-vhost' for topic filter test/topic: access_refused"
                ],
                fun () -> stop end}
              ]),
     ok.
 
-no_topic_write_permission(Config) ->
+topic_write_permission(Config) ->
     set_permissions(".*", ".*", ".*", Config),
     set_topic_permissions("^allow-write\\..*", "^allow-read\\..*", Config),
     C = open_mqtt_connection(Config),
@@ -824,7 +975,7 @@ loopback_user_connects_from_remote_host(Config) ->
     wait_log(Config,
              [?FAIL_IF_CRASH_LOG,
               {["MQTT login failed: user 'mqtt-user' can only connect via localhost",
-                "Rejected MQTT connection .* with CONNACK return code 5"],
+                "Rejected MQTT connection .* with Connect Reason Code 135"],
                fun () -> stop end}
              ]),
 
@@ -862,11 +1013,12 @@ test_subscribe_permissions_combination(PermConf, PermWrite, PermRead, Config, Ex
             {clientid, User},
             {username, User},
             {password, ?config(mqtt_password, Config)}],
-    {ok, C1} = emqtt:start_link([{proto_ver, v4} | Opts]),
+    {ok, C1} = emqtt:start_link([{proto_ver, ?config(mqtt_version, Config)} | Opts]),
     {ok, _} = emqtt:connect(C1),
     process_flag(trap_exit, true),
-    %% In v4, we expect to receive a failure return code for our subscription in the SUBACK packet.
-    ?assertMatch({ok, _Properties, [?SUBACK_FAILURE]},
+    %% In v4 and v5, we expect to receive a failure return code for our subscription in the SUBACK packet.
+    ExpectedReasonCode = suback_error_code(?RC_NOT_AUTHORIZED, Config),
+    ?assertMatch({ok, _Properties, [ExpectedReasonCode]},
                  emqtt:subscribe(C1, <<"test/topic">>)),
     ok = assert_connection_closed(C1),
     wait_log(Config,
@@ -900,7 +1052,7 @@ connect_user(User, Pass, Config, ClientID0, Opts) ->
                end,
     P = rabbit_ct_broker_helpers:get_node_config(Config, 0, tcp_port_mqtt),
     emqtt:start_link(Opts ++ Creds ++ ClientID ++
-                     [{host, "localhost"}, {port, P}, {proto_ver, v4}]).
+                     [{host, "localhost"}, {port, P}, {proto_ver, ?config(mqtt_version, Config)}]).
 
 expect_successful_connection(ConnectFun, Config) ->
     rpc(Config, 0, rabbit_core_metrics, reset_auth_attempt_metrics, []),
@@ -936,8 +1088,9 @@ vhost_connection_limit(Config) ->
     {ok, C2} = connect_anonymous(Config, <<"client2">>),
     {ok, _} = emqtt:connect(C2),
     {ok, C3} = connect_anonymous(Config, <<"client3">>),
+    ExpectedError = expected_connection_limit_error(Config),
     unlink(C3),
-    ?assertMatch({error, {unauthorized_client, _}}, emqtt:connect(C3)),
+    ?assertMatch({error, {ExpectedError, _}}, emqtt:connect(C3)),
     ok = emqtt:disconnect(C1),
     ok = emqtt:disconnect(C2).
 
@@ -947,11 +1100,11 @@ vhost_queue_limit(Config) ->
     {ok, _} = emqtt:connect(C),
     process_flag(trap_exit, true),
     %% qos0 queue can be created, qos1 queue fails to be created.
-    %% (RabbitMQ creates subscriptions in the reverse order of the SUBSCRIBE packet.)
-    ?assertMatch({ok, _Properties, [?SUBACK_FAILURE, ?SUBACK_FAILURE, 0]},
-                 emqtt:subscribe(C, [{<<"topic1">>, qos1},
+    ExpectedRc = suback_error_code(?RC_QUOTA_EXCEEDED, Config),
+    ?assertMatch({ok, _Properties, [0, ExpectedRc, ExpectedRc]},
+                 emqtt:subscribe(C, [{<<"topic1">>, qos0},
                                      {<<"topic2">>, qos1},
-                                     {<<"topic3">>, qos0}])),
+                                     {<<"topic3">>, qos1}])),
     ok = assert_connection_closed(C).
 
 user_connection_limit(Config) ->
@@ -960,10 +1113,28 @@ user_connection_limit(Config) ->
     {ok, C1} = connect_anonymous(Config, <<"client1">>),
     {ok, _} = emqtt:connect(C1),
     {ok, C2} = connect_anonymous(Config, <<"client2">>),
+    ExpectedError = expected_connection_limit_error(Config),
     unlink(C2),
-    ?assertMatch({error, {unauthorized_client, _}}, emqtt:connect(C2)),
+    ?assertMatch({error, {ExpectedError, _}}, emqtt:connect(C2)),
     ok = emqtt:disconnect(C1),
     ok = rabbit_ct_broker_helpers:clear_user_limits(Config, DefaultUser, max_connections).
+
+expected_connection_limit_error(Config) ->
+    case ?config(mqtt_version, Config) of
+        v4 ->
+            unauthorized_client;
+        v5 ->
+            %% MQTT 5.0 has more specific error codes.
+            quota_exceeded
+    end.
+
+suback_error_code(ReasonCode, Config) ->
+    case ?config(mqtt_version, Config) of
+        v4 ->
+            ?SUBACK_FAILURE;
+        v5 ->
+            ReasonCode
+    end.
 
 wait_log(Config, Clauses) ->
     wait_log(Config, Clauses, erlang:monotonic_time(millisecond) + 1000).

@@ -1,4 +1,4 @@
-%% This Source Code Form is subject to the terms of the Mozilla Public
+% This Source Code Form is subject to the terms of the Mozilla Public
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
@@ -46,6 +46,7 @@
          list_local_mirrored_classic_without_synchronised_mirrors_for_cli/0,
          list_local_quorum_queues_with_name_matching/1,
          list_local_quorum_queues_with_name_matching/2]).
+-export([is_local_to_node/2, is_local_to_node_set/2]).
 -export([ensure_rabbit_queue_record_is_initialized/1]).
 -export([format/1]).
 -export([delete_immediately_by_resource/1]).
@@ -68,6 +69,7 @@
 -export([deactivate_limit_all/2]).
 
 -export([prepend_extra_bcc/1]).
+-export([queue/1, queue_name/1, queue_names/1]).
 
 %% internal
 -export([internal_declare/2, internal_delete/2, run_backing_queue/3,
@@ -101,8 +103,15 @@
 -type queue_not_found() :: not_found.
 -type queue_absent() :: {'absent', amqqueue:amqqueue(), absent_reason()}.
 -type not_found_or_absent() :: queue_not_found() | queue_absent().
+-type route_infos() :: rabbit_exchange:route_infos().
 
 %%----------------------------------------------------------------------------
+
+-rabbit_deprecated_feature(
+   {transient_nonexcl_queues,
+    #{deprecation_phase => permitted_by_default,
+      doc_url => "https://blog.rabbitmq.com/posts/2021/08/4.0-deprecation-announcements/#removal-of-transient-non-exclusive-queues"
+     }}).
 
 -define(CONSUMER_INFO_KEYS,
         [queue_name, channel_pid, consumer_tag, ack_required, prefetch_count,
@@ -220,7 +229,14 @@ declare(QueueName = #resource{virtual_host = VHost}, Durable, AutoDelete, Args,
                              VHost,
                              #{user => ActingUser},
                              Type),
-            rabbit_queue_type:declare(Q, Node);
+            case is_queue_args_combination_permitted(Q) of
+                true ->
+                    rabbit_queue_type:declare(Q, Node);
+                false ->
+                    Warning = rabbit_deprecated_features:get_warning(
+                                transient_nonexcl_queues),
+                    {protocol_error, internal_error, "~ts", [Warning]}
+            end;
         false ->
             {protocol_error, internal_error,
              "Cannot declare a queue '~ts' of type '~ts' on node '~ts': "
@@ -316,9 +332,11 @@ lookup(Name) when is_record(Name, resource) ->
 lookup_durable_queue(QName) ->
     rabbit_db_queue:get_durable(QName).
 
--spec lookup_many ([name()]) -> [amqqueue:amqqueue()].
-
-lookup_many([])     -> [];                             %% optimisation
+-spec lookup_many(rabbit_exchange:route_return()) ->
+    [amqqueue:amqqueue() | {amqqueue:amqqueue(), route_infos()}].
+lookup_many([]) ->
+    %% optimisation
+    [];
 lookup_many(Names) when is_list(Names) ->
     rabbit_db_queue:get_many(Names).
 
@@ -652,13 +670,57 @@ priv_absent(QueueName, QPid, _IsDurable, alive) ->
             'ok' | rabbit_types:channel_exit() | rabbit_types:connection_exit().
 
 assert_equivalence(Q, DurableDeclare, AutoDeleteDeclare, Args1, Owner) ->
+    case equivalence_check_level(Q, Args1) of
+        all_checks ->
+            perform_full_equivalence_checks(Q, DurableDeclare, AutoDeleteDeclare,
+                                            Args1, Owner);
+        relaxed_checks ->
+            perform_limited_equivalence_checks_on_qq_redeclaration(Q, Args1)
+    end.
+
+-type equivalence_check_level() :: 'all_checks' | 'relaxed_checks'.
+
+-spec equivalence_check_level(amqqueue:amqqueue(), rabbit_framing:amqp_table()) -> equivalence_check_level().
+equivalence_check_level(Q, NewArgs) ->
+    Relaxed = rabbit_misc:get_env(rabbit,
+                                  quorum_relaxed_checks_on_redeclaration,
+                                  false),
+    case Relaxed of
+        true ->
+            ExistingArgs = amqqueue:get_arguments(Q),
+            OldType = rabbit_misc:table_lookup(ExistingArgs, <<"x-queue-type">>),
+            NewType = rabbit_misc:table_lookup(NewArgs, <<"x-queue-type">>),
+            case {OldType, NewType} of
+                {{longstr, <<"quorum">>}, {longstr, <<"classic">>}} ->
+                    relaxed_checks;
+                _ ->
+                    all_checks
+            end;
+        false ->
+            all_checks
+    end.
+
+perform_full_equivalence_checks(Q, DurableDeclare, AutoDeleteDeclare, NewArgs, Owner) ->
     QName = amqqueue:get_name(Q),
     DurableQ = amqqueue:is_durable(Q),
     AutoDeleteQ = amqqueue:is_auto_delete(Q),
     ok = check_exclusive_access(Q, Owner, strict),
     ok = rabbit_misc:assert_field_equivalence(DurableQ, DurableDeclare, QName, durable),
     ok = rabbit_misc:assert_field_equivalence(AutoDeleteQ, AutoDeleteDeclare, QName, auto_delete),
-    ok = assert_args_equivalence(Q, Args1).
+    ok = assert_args_equivalence(Q, NewArgs).
+
+perform_limited_equivalence_checks_on_qq_redeclaration(Q, NewArgs) ->
+    QName = amqqueue:get_name(Q),
+    ExistingArgs = amqqueue:get_arguments(Q),
+    CheckTypeArgs = [<<"x-dead-letter-exchange">>,
+                     <<"x-dead-letter-routing-key">>,
+                     <<"x-expires">>,
+                     <<"x-max-length">>,
+                     <<"x-max-length-bytes">>,
+                     <<"x-single-active-consumer">>,
+                     <<"x-message-ttl">>],
+    ok = rabbit_misc:assert_args_equivalence(ExistingArgs, NewArgs, QName, CheckTypeArgs).
+
 
 -spec augment_declare_args(vhost:name(), boolean(),
                            boolean(), boolean(),
@@ -672,8 +734,11 @@ augment_declare_args(VHost, Durable, Exclusive, AutoDelete, Args0) ->
           when is_binary(DefaultQueueType) andalso
                not HasQTypeArg ->
             Type = rabbit_queue_type:discover(DefaultQueueType),
-            case rabbit_queue_type:is_compatible(Type, Durable,
-                                                 Exclusive, AutoDelete) of
+            IsPermitted = is_queue_args_combination_permitted(
+                            Durable, Exclusive),
+            IsCompatible = rabbit_queue_type:is_compatible(
+                             Type, Durable, Exclusive, AutoDelete),
+            case IsPermitted andalso IsCompatible of
                 true ->
                     %% patch up declare arguments with x-queue-type if there
                     %% is a vhost default set the queue is druable and not exclusive
@@ -769,26 +834,27 @@ check_arguments_key(QueueName, QueueType, Args, InvalidArgs) ->
                   end, Args).
 
 declare_args() ->
-    [{<<"x-expires">>,                 fun check_expires_arg/2},
-     {<<"x-message-ttl">>,             fun check_message_ttl_arg/2},
-     {<<"x-dead-letter-exchange">>,    fun check_dlxname_arg/2},
+    [{<<"x-expires">>, fun check_expires_arg/2},
+     {<<"x-message-ttl">>, fun check_message_ttl_arg/2},
+     {<<"x-dead-letter-exchange">>, fun check_dlxname_arg/2},
      {<<"x-dead-letter-routing-key">>, fun check_dlxrk_arg/2},
-     {<<"x-dead-letter-strategy">>,    fun check_dlxstrategy_arg/2},
-     {<<"x-max-length">>,              fun check_non_neg_int_arg/2},
-     {<<"x-max-length-bytes">>,        fun check_non_neg_int_arg/2},
-     {<<"x-max-in-memory-length">>,    fun check_non_neg_int_arg/2},
-     {<<"x-max-in-memory-bytes">>,     fun check_non_neg_int_arg/2},
-     {<<"x-max-priority">>,            fun check_max_priority_arg/2},
-     {<<"x-overflow">>,                fun check_overflow/2},
-     {<<"x-queue-mode">>,              fun check_queue_mode/2},
-     {<<"x-queue-version">>,           fun check_queue_version/2},
-     {<<"x-single-active-consumer">>,  fun check_single_active_consumer_arg/2},
-     {<<"x-queue-type">>,              fun check_queue_type/2},
-     {<<"x-quorum-initial-group-size">>,     fun check_initial_cluster_size_arg/2},
-     {<<"x-max-age">>,                 fun check_max_age_arg/2},
-     {<<"x-stream-max-segment-size-bytes">>,        fun check_non_neg_int_arg/2},
-     {<<"x-initial-cluster-size">>,    fun check_initial_cluster_size_arg/2},
-     {<<"x-queue-leader-locator">>,    fun check_queue_leader_locator_arg/2}].
+     {<<"x-dead-letter-strategy">>, fun check_dlxstrategy_arg/2},
+     {<<"x-max-length">>, fun check_non_neg_int_arg/2},
+     {<<"x-max-length-bytes">>, fun check_non_neg_int_arg/2},
+     {<<"x-max-in-memory-length">>, fun check_non_neg_int_arg/2},
+     {<<"x-max-in-memory-bytes">>, fun check_non_neg_int_arg/2},
+     {<<"x-max-priority">>, fun check_max_priority_arg/2},
+     {<<"x-overflow">>, fun check_overflow/2},
+     {<<"x-queue-mode">>, fun check_queue_mode/2},
+     {<<"x-queue-version">>, fun check_queue_version/2},
+     {<<"x-single-active-consumer">>, fun check_single_active_consumer_arg/2},
+     {<<"x-queue-type">>, fun check_queue_type/2},
+     {<<"x-quorum-initial-group-size">>, fun check_initial_cluster_size_arg/2},
+     {<<"x-max-age">>, fun check_max_age_arg/2},
+     {<<"x-stream-max-segment-size-bytes">>, fun check_non_neg_int_arg/2},
+     {<<"x-stream-filter-size-bytes">>, fun check_non_neg_int_arg/2},
+     {<<"x-initial-cluster-size">>, fun check_initial_cluster_size_arg/2},
+     {<<"x-queue-leader-locator">>, fun check_queue_leader_locator_arg/2}].
 
 consume_args() -> [{<<"x-priority">>,              fun check_int_arg/2},
                    {<<"x-cancel-on-ha-failover">>, fun check_bool_arg/2},
@@ -1028,16 +1094,15 @@ check_queue_version(Val, Args) ->
         Error            -> Error
     end.
 
--define(KNOWN_QUEUE_TYPES, [<<"classic">>, <<"quorum">>, <<"stream">>]).
 check_queue_type({longstr, Val}, _Args) ->
-    case lists:member(Val, ?KNOWN_QUEUE_TYPES) of
+    case lists:member(Val, rabbit_queue_type:known_queue_type_names()) of
         true  -> ok;
         false -> {error, rabbit_misc:format("unsupported queue type '~ts'", [Val])}
     end;
 check_queue_type({Type,    _}, _Args) ->
     {error, {unacceptable_type, Type}};
 check_queue_type(Val, _Args) when is_binary(Val) ->
-    case lists:member(Val, ?KNOWN_QUEUE_TYPES) of
+    case lists:member(Val, rabbit_queue_type:known_queue_type_names()) of
         true  -> ok;
         false -> {error, rabbit_misc:format("unsupported queue type '~ts'", [Val])}
     end;
@@ -1052,7 +1117,7 @@ list() ->
     lists:filter(fun (Q) ->
                          Pid = amqqueue:get_pid(Q),
                          St = amqqueue:get_state(Q),
-                         St =/= stopped orelse lists:member(node(Pid), NodesRunning)
+                         St =/= stopped orelse is_local_to_node_set(Pid, NodesRunning)
                  end, All).
 
 -spec count() -> non_neg_integer().
@@ -1077,13 +1142,16 @@ list_local_names_down() ->
                               is_down(Q)].
 
 is_down(Q) ->
-    try
-        info(Q, [state]) == [{state, down}]
-    catch
-        _:_ ->
-            true
+    case rabbit_process:is_process_hibernated(amqqueue:get_pid(Q)) of
+        true -> false;
+        false ->
+            try
+                    info(Q, [state]) == [{state, down}]
+            catch
+                _:_ ->
+                    true
+            end
     end.
-
 
 -spec sample_local_queues() -> [amqqueue:amqqueue()].
 sample_local_queues() -> sample_n_by_name(list_local_names(), 300).
@@ -1224,6 +1292,11 @@ is_local_to_node({_, Leader} = QPid, Node) when ?IS_QUORUM(QPid) ->
 is_local_to_node(_QPid, _Node) ->
     false.
 
+is_local_to_node_set(QPid, Nodes) when is_list(Nodes) ->
+  lists:any(fun(Node) -> is_local_to_node(QPid, Node) end, Nodes);
+is_local_to_node_set(QPid, OneNode) when is_atom(OneNode) ->
+  is_local_to_node(QPid, OneNode).
+
 is_in_virtual_host(Q, VHostName) ->
     VHostName =:= get_resource_vhost_name(amqqueue:get_name(Q)).
 
@@ -1234,7 +1307,7 @@ list(VHostPath) ->
     lists:filter(fun (Q) ->
                          Pid = amqqueue:get_pid(Q),
                          St = amqqueue:get_state(Q),
-                         St =/= stopped orelse lists:member(node(Pid), NodesRunning)
+                         St =/= stopped orelse is_local_to_node_set(Pid, NodesRunning)
                  end, All).
 
 -spec list_down(rabbit_types:vhost()) -> [amqqueue:amqqueue()].
@@ -1252,7 +1325,7 @@ list_down(VHostPath) ->
                       St = amqqueue:get_state(Q),
                       amqqueue:get_vhost(Q) =:= VHostPath
                           andalso
-                            ((St =:= stopped andalso not lists:member(node(Pid), NodesRunning))
+                            ((St =:= stopped andalso not is_local_to_node_set(Pid, NodesRunning))
                              orelse
                                (not sets:is_element(N, Alive)))
               end)
@@ -1469,7 +1542,7 @@ stat(Q) ->
     rabbit_queue_type:stat(Q).
 
 -spec pid_of(amqqueue:amqqueue()) ->
-          pid() | 'none'.
+          pid() | amqqueue:ra_server_id() | 'none'.
 
 pid_of(Q) -> amqqueue:get_pid(Q).
 
@@ -1605,7 +1678,7 @@ activate_limit_all(QRefs, ChPid) ->
 deactivate_limit_all(QRefs, ChPid) ->
     QPids = [P || P <- QRefs, ?IS_CLASSIC(P)],
     delegate:invoke_no_result(QPids, {gen_server2, cast,
-                                      [{deactivate_limit, ChPid}]}).									  
+                                      [{deactivate_limit, ChPid}]}).
 
 -spec credit(amqqueue:amqqueue(),
              rabbit_types:ctag(),
@@ -1946,11 +2019,13 @@ get_quorum_nodes(Q) ->
             []
     end.
 
--spec prepend_extra_bcc([amqqueue:amqqueue()]) ->
-    [amqqueue:amqqueue()].
+-spec prepend_extra_bcc(Qs) ->
+    Qs when Qs :: [amqqueue:amqqueue() |
+                   {amqqueue:amqqueue(), route_infos()}].
 prepend_extra_bcc([]) ->
     [];
-prepend_extra_bcc([Q] = Qs) ->
+prepend_extra_bcc([Q0] = Qs) ->
+    Q = queue(Q0),
     case amqqueue:get_options(Q) of
         #{extra_bcc := BCCName} ->
             case get_bcc_queue(Q, BCCName) of
@@ -1965,7 +2040,8 @@ prepend_extra_bcc([Q] = Qs) ->
 prepend_extra_bcc(Qs) ->
     BCCQueues =
         lists:filtermap(
-          fun(Q) ->
+          fun(Q0) ->
+                  Q = queue(Q0),
                   case amqqueue:get_options(Q) of
                       #{extra_bcc := BCCName} ->
                           case get_bcc_queue(Q, BCCName) of
@@ -1980,9 +2056,50 @@ prepend_extra_bcc(Qs) ->
           end, Qs),
     lists:usort(BCCQueues) ++ Qs.
 
+-spec queue(Q | {Q, route_infos()}) ->
+    Q when Q :: amqqueue:amqqueue().
+queue(Q)
+  when ?is_amqqueue(Q) ->
+    Q;
+queue({Q, RouteInfos})
+  when ?is_amqqueue(Q) andalso is_map(RouteInfos) ->
+    Q.
+
+-spec queue_name(name() | {name(), route_infos()}) ->
+    name().
+queue_name(QName = #resource{kind = queue}) ->
+    QName;
+queue_name({QName = #resource{kind = queue}, RouteInfos})
+  when is_map(RouteInfos) ->
+    QName.
+
+-spec queue_names([Q | {Q, route_infos()}]) ->
+    [name()] when Q :: amqqueue:amqqueue().
+queue_names(Queues)
+  when is_list(Queues) ->
+    lists:map(fun(Q) when ?is_amqqueue(Q) ->
+                      amqqueue:get_name(Q);
+                 ({Q, RouteInfos})
+                   when ?is_amqqueue(Q) andalso is_map(RouteInfos) ->
+                      amqqueue:get_name(Q)
+              end, Queues).
+
 -spec get_bcc_queue(amqqueue:amqqueue(), binary()) ->
     {ok, amqqueue:amqqueue()} | {error, not_found}.
 get_bcc_queue(Q, BCCName) ->
     #resource{virtual_host = VHost} = amqqueue:get_name(Q),
     BCCQueueName = rabbit_misc:r(VHost, queue, BCCName),
     rabbit_amqqueue:lookup(BCCQueueName).
+
+is_queue_args_combination_permitted(Q) ->
+    Durable = amqqueue:is_durable(Q),
+    Exclusive = is_exclusive(Q),
+    is_queue_args_combination_permitted(Durable, Exclusive).
+
+is_queue_args_combination_permitted(Durable, Exclusive) ->
+    case not Durable andalso not Exclusive of
+        false ->
+            true;
+        true ->
+            rabbit_deprecated_features:is_permitted(transient_nonexcl_queues)
+    end.

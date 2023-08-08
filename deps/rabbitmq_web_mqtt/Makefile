@@ -17,6 +17,7 @@ endef
 BUILD_WITHOUT_QUIC=1
 export BUILD_WITHOUT_QUIC
 
+LOCAL_DEPS = ssl
 DEPS = rabbit_common rabbit cowboy rabbitmq_mqtt
 TEST_DEPS = emqtt rabbitmq_ct_helpers rabbitmq_ct_client_helpers rabbitmq_management
 
@@ -24,7 +25,7 @@ TEST_DEPS = emqtt rabbitmq_ct_helpers rabbitmq_ct_client_helpers rabbitmq_manage
 # See rabbitmq-components.mk.
 BUILD_DEPS += ranch
 
-dep_emqtt = git https://github.com/emqx/emqtt.git 1.8.2
+dep_emqtt = git https://github.com/rabbitmq/emqtt.git master
 
 DEP_EARLY_PLUGINS = rabbit_common/mk/rabbitmq-early-plugin.mk
 DEP_PLUGINS = rabbit_common/mk/rabbitmq-plugin.mk

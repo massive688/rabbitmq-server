@@ -104,3 +104,19 @@
       stability     => stable,
       depends_on    => [stream_queue]
      }}).
+
+
+-rabbit_feature_flag(
+   {stream_sac_coordinator_unblock_group,
+    #{desc          => "Bug fix to unblock a group of consumers in a super stream partition",
+      doc_url       => "https://github.com/rabbitmq/rabbitmq-server/issues/7743",
+      stability     => stable,
+      depends_on    => [stream_single_active_consumer]
+     }}).
+
+-rabbit_feature_flag(
+   {stream_filtering,
+    #{desc          => "Support for stream filtering.",
+      stability     => stable,
+      depends_on    => [stream_queue]
+     }}).

@@ -20,6 +20,9 @@
 %% OTP bug: https://bugs.erlang.org/browse/ERL-1478
 -define(SKIPPED_CIPHERS, [aes_ige256]).
 
+%% OTP-26 introduced algorithms that don't play well with the test
+-define(SKIPPED_HASHES, [shake128, shake256]).
+
 all() ->
     [
         {group, parallel_tests},
@@ -40,7 +43,6 @@ groups() ->
             deep_pget,
             encrypt_decrypt,
             encrypt_decrypt_term,
-            version_equivalence,
             pid_decompose_compose,
             platform_and_version,
             frame_encoding_does_not_fail_with_empty_binary_payload,
@@ -356,7 +358,7 @@ pid_decompose_compose(_Config) ->
 
 encrypt_decrypt(_Config) ->
     %% Take all available block ciphers.
-    Hashes = rabbit_pbe:supported_hashes(),
+    Hashes = rabbit_pbe:supported_hashes() -- ?SKIPPED_HASHES,
     Ciphers = rabbit_pbe:supported_ciphers() -- ?SKIPPED_CIPHERS,
     %% For each cipher, try to encrypt and decrypt data sizes from 0 to 64 bytes
     %% with a random passphrase.
@@ -374,7 +376,7 @@ encrypt_decrypt(_Config) ->
 
 encrypt_decrypt_term(_Config) ->
     %% Take all available block ciphers.
-    Hashes = rabbit_pbe:supported_hashes(),
+    Hashes = rabbit_pbe:supported_hashes() -- ?SKIPPED_HASHES,
     Ciphers = rabbit_pbe:supported_ciphers() -- ?SKIPPED_CIPHERS,
     %% Different Erlang terms to try encrypting.
     DataSet = [
@@ -397,38 +399,6 @@ encrypt_decrypt_term(_Config) ->
              Data = rabbit_pbe:decrypt_term(C, H, Iterations, PassPhrase, Enc)
          end || H <- Hashes, C <- Ciphers, Data <- DataSet],
     ok.
-
-version_equivalence(_Config) ->
-    true = rabbit_misc:version_minor_equivalent("3.0.0", "3.0.0"),
-    true = rabbit_misc:version_minor_equivalent("3.0.0", "3.0.1"),
-    true = rabbit_misc:version_minor_equivalent("%%VSN%%", "%%VSN%%"),
-    true = rabbit_misc:version_minor_equivalent("3.0.0", "3.0"),
-    true = rabbit_misc:version_minor_equivalent("3.0.0", "3.0.0.1"),
-    true = rabbit_misc:version_minor_equivalent("3.0.0.1", "3.0.0.3"),
-    true = rabbit_misc:version_minor_equivalent("3.0.0.1", "3.0.1.3"),
-    true = rabbit_misc:version_minor_equivalent("3.0.0", "3.0.foo"),
-    false = rabbit_misc:version_minor_equivalent("3.0.0", "3.1.0"),
-    false = rabbit_misc:version_minor_equivalent("3.0.0.1", "3.1.0.1"),
-
-    false = rabbit_misc:version_minor_equivalent("3.5.7", "3.6.7"),
-    false = rabbit_misc:version_minor_equivalent("3.6.5", "3.6.6"),
-    false = rabbit_misc:version_minor_equivalent("3.6.6", "3.7.0"),
-    true = rabbit_misc:version_minor_equivalent("3.6.7", "3.6.6"),
-
-    %% Starting with RabbitMQ 3.7.x and feature flags introduced in
-    %% RabbitMQ 3.8.x, versions are considered equivalent and the actual
-    %% check is deferred to the feature flags module.
-    false = rabbit_misc:version_minor_equivalent("3.6.0", "3.8.0"),
-    true = rabbit_misc:version_minor_equivalent("3.7.0", "3.8.0"),
-    true = rabbit_misc:version_minor_equivalent("3.7.0", "3.10.0"),
-
-    true = rabbit_misc:version_minor_equivalent(<<"3.0.0">>, <<"3.0.0">>),
-    true = rabbit_misc:version_minor_equivalent(<<"3.0.0">>, <<"3.0.1">>),
-    true = rabbit_misc:version_minor_equivalent(<<"%%VSN%%">>, <<"%%VSN%%">>),
-    true = rabbit_misc:version_minor_equivalent(<<"3.0.0">>, <<"3.0">>),
-    true = rabbit_misc:version_minor_equivalent(<<"3.0.0">>, <<"3.0.0.1">>),
-    false = rabbit_misc:version_minor_equivalent(<<"3.0.0">>, <<"3.1.0">>),
-    false = rabbit_misc:version_minor_equivalent(<<"3.0.0.1">>, <<"3.1.0.1">>).
 
 frame_encoding_does_not_fail_with_empty_binary_payload(_Config) ->
     [begin

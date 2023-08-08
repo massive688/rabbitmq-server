@@ -279,7 +279,11 @@ delete_in_mnesia(QueueName, Reason) ->
                   {[], []} ->
                       ok;
                   _ ->
-                      internal_delete_in_mnesia(QueueName, false, Reason)
+                      OnlyDurable = case Reason of
+                                        missing_owner -> true;
+                                        _ -> false
+                                    end,
+                      internal_delete_in_mnesia(QueueName, OnlyDurable, Reason)
               end
       end).
 
@@ -322,20 +326,37 @@ internal_delete_in_mnesia(QueueName, OnlyDurable, Reason) ->
 %% get_many().
 %% -------------------------------------------------------------------
 
--spec get_many([QName]) -> Ret when
-      QName :: rabbit_amqqueue:name(),
-      Ret :: [Queue :: amqqueue:amqqueue()].
+-spec get_many(rabbit_exchange:route_return()) ->
+    [amqqueue:amqqueue() | {amqqueue:amqqueue(), rabbit_exchange:route_infos()}].
 get_many(Names) when is_list(Names) ->
     rabbit_db:run(
       #{mnesia => fun() -> get_many_in_mnesia(?MNESIA_TABLE, Names) end
        }).
 
+get_many_in_mnesia(Table, [{Name, RouteInfos}])
+  when is_map(RouteInfos) ->
+    case ets:lookup(Table, Name) of
+        [] -> [];
+        [Q] -> [{Q, RouteInfos}]
+    end;
 get_many_in_mnesia(Table, [Name]) ->
     ets:lookup(Table, Name);
-get_many_in_mnesia(Table, Names) when is_list(Names) ->
+get_many_in_mnesia(Table, Names)
+  when is_list(Names) ->
     %% Normally we'd call mnesia:dirty_read/1 here, but that is quite
     %% expensive for reasons explained in rabbit_mnesia:dirty_read/1.
-    lists:append([ets:lookup(Table, Name) || Name <- Names]).
+    lists:filtermap(fun({Name, RouteInfos})
+                          when is_map(RouteInfos) ->
+                            case ets:lookup(Table, Name) of
+                                [] -> false;
+                                [Q] -> {true, {Q, RouteInfos}}
+                            end;
+                       (Name) ->
+                            case ets:lookup(Table, Name) of
+                                [] -> false;
+                                [Q] -> {true, Q}
+                            end
+                    end, Names).
 
 %% -------------------------------------------------------------------
 %% get().
@@ -590,8 +611,8 @@ create_or_get_in_mnesia(Q) ->
                           {error, not_found} ->
                               set_in_mnesia_tx(DurableQ, Q),
                               {created, Q};
-                          {ok, Q} ->
-                              {absent, Q, nodedown}
+                          {ok, QRecord} ->
+                              {absent, QRecord, nodedown}
                       end;
                   [ExistingQ] ->
                       {existing, ExistingQ}

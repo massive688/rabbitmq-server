@@ -55,7 +55,7 @@ def _plugins_dir_links(ctx, plugin):
         if f.is_directory:
             if f.basename != "ebin":
                 fail("{} contains a directory in 'beam' that is not an ebin dir".format(lib_info.lib_name))
-            o = ctx.actions.declare_file(path_join(plugin_path, "ebin"))
+            o = ctx.actions.declare_directory(path_join(plugin_path, "ebin"))
         else:
             o = ctx.actions.declare_file(path_join(plugin_path, "ebin", f.basename))
         ctx.actions.symlink(
@@ -87,7 +87,7 @@ def _impl(ctx):
         source_scripts = ctx.files._scripts_windows
     scripts = [_copy_script(ctx, script) for script in source_scripts]
 
-    escripts = [copy_escript(ctx, escript) for escript in ctx.files._scripts]
+    escripts = [copy_escript(ctx, escript) for escript in ctx.files._escripts]
 
     plugins = flatten([_plugins_dir_links(ctx, plugin) for plugin in plugins])
 
@@ -108,6 +108,18 @@ def _impl(ctx):
     ]
 
 RABBITMQ_HOME_ATTRS = {
+    "_escripts": attr.label_list(
+        default = [
+            "//deps/rabbit:scripts/rabbitmq-diagnostics",
+            "//deps/rabbit:scripts/rabbitmq-plugins",
+            "//deps/rabbit:scripts/rabbitmq-queues",
+            "//deps/rabbit:scripts/rabbitmq-streams",
+            "//deps/rabbit:scripts/rabbitmq-upgrade",
+            "//deps/rabbit:scripts/rabbitmqctl",
+            "//deps/rabbit:scripts/vmware-rabbitmq",
+        ],
+        allow_files = True,
+    ),
     "_scripts": attr.label_list(
         default = [
             "//deps/rabbit:scripts/rabbitmq-defaults",

@@ -175,6 +175,12 @@
                     {requires,    [rabbit_alarm, guid_generator]},
                     {enables,     core_initialized}]}).
 
+-rabbit_boot_step({rabbit_quorum_queue_periodic_membership_reconciliation,
+                   [{description, "Quorums Queue membership reconciliation"},
+                    {mfa,         {rabbit_sup, start_restartable_child,
+                                   [rabbit_quorum_queue_periodic_membership_reconciliation]}},
+                    {requires, [database]}]}).
+
 -rabbit_boot_step({rabbit_epmd_monitor,
                    [{description, "epmd monitor"},
                     {mfa,         {rabbit_sup, start_restartable_child,
@@ -506,7 +512,10 @@ start_apps(Apps, RestartTypes) ->
     %% We need to load all applications involved in order to be able to
     %% find new feature flags.
     app_utils:load_applications(Apps),
-    ok = rabbit_feature_flags:refresh_feature_flags_after_app_load(),
+    case rabbit_feature_flags:refresh_feature_flags_after_app_load() of
+        ok    -> ok;
+        Error -> throw(Error)
+    end,
     rabbit_prelaunch_conf:decrypt_config(Apps),
     lists:foreach(
       fun(App) ->
@@ -926,7 +935,10 @@ start(normal, []) ->
         %% once, because it does not involve running code from the
         %% plugins.
         ok = app_utils:load_applications(Plugins),
-        ok = rabbit_feature_flags:refresh_feature_flags_after_app_load(),
+        case rabbit_feature_flags:refresh_feature_flags_after_app_load() of
+            ok     -> ok;
+            Error1 -> throw(Error1)
+        end,
 
         persist_static_configuration(),
 
@@ -1026,10 +1038,7 @@ prep_stop(State) ->
 
 stop(State) ->
     ok = rabbit_alarm:stop(),
-    ok = case rabbit_db_cluster:is_clustered() of
-             true  -> ok;
-             false -> rabbit_table:clear_ram_only_tables()
-         end,
+    ok = rabbit_table:maybe_clear_ram_only_tables(),
     case State of
         [] -> rabbit_prelaunch:set_stop_reason(normal);
         _  -> rabbit_prelaunch:set_stop_reason(State)
@@ -1049,7 +1058,6 @@ boot_delegate() ->
 -spec recover() -> 'ok'.
 
 recover() ->
-    ok = rabbit_policy:recover(),
     ok = rabbit_vhost:recover(),
     ok.
 
@@ -1641,18 +1649,20 @@ ensure_working_fhc() ->
 %% should be placed into persistent_term for efficiency.
 persist_static_configuration() ->
     persist_static_configuration(
-      [{rabbit, classic_queue_index_v2_segment_entry_count},
-       {rabbit, classic_queue_store_v2_max_cache_size},
-       {rabbit, classic_queue_store_v2_check_crc32}
+      [classic_queue_index_v2_segment_entry_count,
+       classic_queue_store_v2_max_cache_size,
+       classic_queue_store_v2_check_crc32,
+       incoming_message_interceptors
       ]).
 
-persist_static_configuration(AppParams) ->
+persist_static_configuration(Params) ->
+    App = ?MODULE,
     lists:foreach(
-      fun(Key = {App, Param}) ->
+      fun(Param) ->
               case application:get_env(App, Param) of
                   {ok, Value} ->
-                      ok = persistent_term:put(Key, Value);
+                      ok = persistent_term:put({App, Param}, Value);
                   undefined ->
                       ok
               end
-      end, AppParams).
+      end, Params).

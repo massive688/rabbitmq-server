@@ -2,7 +2,7 @@
 ## License, v. 2.0. If a copy of the MPL was not distributed with this
 ## file, You can obtain one at https://mozilla.org/MPL/2.0/.
 ##
-## Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
+## Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
 
 defmodule AddVhostCommandTest do
   use ExUnit.Case, async: false
@@ -78,7 +78,7 @@ defmodule AddVhostCommandTest do
   end
 
   @tag vhost: @vhost
-  test "run: vhost tags are conformed to a list", context do
+  test "run: vhost tags are coerced to a list", context do
     opts = Map.merge(context[:opts], %{description: "My vhost", tags: "my_tag"})
     assert @command.run([context[:vhost]], opts) == :ok
     record = list_vhosts() |> Enum.find(fn record -> record[:name] == context[:vhost] end)

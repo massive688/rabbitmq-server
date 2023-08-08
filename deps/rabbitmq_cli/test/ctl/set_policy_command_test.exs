@@ -2,7 +2,7 @@
 ## License, v. 2.0. If a copy of the MPL was not distributed with this
 ## file, You can obtain one at https://mozilla.org/MPL/2.0/.
 ##
-## Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
+## Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
 
 defmodule SetPolicyCommandTest do
   use ExUnit.Case, async: false
@@ -129,7 +129,7 @@ defmodule SetPolicyCommandTest do
              context[:opts]
            ) ==
              {:error_string,
-              'Validation failed\n\n[{<<"foo">>,<<"bar">>}] are not recognised policy settings\n'}
+              ~c"Validation failed\n\n[{<<\"foo\">>,<<\"bar\">>}] are not recognised policy settings\n"}
 
     assert list_policies(context[:vhost]) == []
   end
@@ -139,7 +139,7 @@ defmodule SetPolicyCommandTest do
     assert @command.run(
              [context[:key], context[:pattern], context[:value]],
              context[:opts]
-           ) == {:error_string, 'Validation failed\n\nno policy provided\n'}
+           ) == {:error_string, ~c"Validation failed\n\nno policy provided\n"}
 
     assert list_policies(context[:vhost]) == []
   end

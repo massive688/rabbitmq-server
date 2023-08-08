@@ -16,30 +16,35 @@
 -import(util, [all_connection_pids/1,
                publish_qos1_timeout/4,
                expect_publishes/3,
-               connect/2,
-               connect/3,
-               await_exit/1]).
+               connect/2, connect/3,
+               await_exit/1,
+               non_clean_sess_opts/0
+              ]).
 
 all() ->
     [
-     {group, tests}
+     {group, v4},
+     {group, v5}
     ].
 
 groups() ->
     [
-     {tests, [],
-      [
-       block_connack_timeout,
-       handle_invalid_packets,
-       login_timeout,
-       stats,
-       quorum_clean_session_false,
-       quorum_clean_session_true,
-       classic_clean_session_true,
-       classic_clean_session_false,
-       event_authentication_failure,
-       rabbit_mqtt_qos0_queue_overflow
-      ]}
+     {v4, [shuffle], tests()},
+     {v5, [shuffle], tests()}
+    ].
+
+tests() ->
+    [
+     block_connack_timeout,
+     handle_invalid_packets,
+     login_timeout,
+     stats,
+     quorum_clean_session_false,
+     quorum_clean_session_true,
+     classic_clean_session_true,
+     classic_clean_session_false,
+     event_authentication_failure,
+     rabbit_mqtt_qos0_queue_overflow
     ].
 
 suite() ->
@@ -50,11 +55,10 @@ suite() ->
 %% -------------------------------------------------------------------
 
 merge_app_env(Config) ->
-    rabbit_ct_helpers:merge_app_env(Config,
-                                    {rabbit, [
-                                              {collect_statistics, basic},
-                                              {collect_statistics_interval, 100}
-                                             ]}).
+    rabbit_ct_helpers:merge_app_env(
+      Config, {rabbit, [{collect_statistics, basic},
+                        {collect_statistics_interval, 100}
+                       ]}).
 
 init_per_suite(Config) ->
     rabbit_ct_helpers:log_environment(),
@@ -63,18 +67,21 @@ init_per_suite(Config) ->
         {rmq_extra_tcp_ports, [tcp_port_mqtt_extra,
                                tcp_port_mqtt_tls_extra]}
       ]),
-    rabbit_ct_helpers:run_setup_steps(Config1,
-      [ fun merge_app_env/1 ] ++
-      rabbit_ct_broker_helpers:setup_steps() ++
-      rabbit_ct_client_helpers:setup_steps()).
+    Config2 = rabbit_ct_helpers:run_setup_steps(
+                Config1,
+                [fun merge_app_env/1] ++
+                rabbit_ct_broker_helpers:setup_steps() ++
+                rabbit_ct_client_helpers:setup_steps()),
+    ok = rabbit_ct_broker_helpers:enable_feature_flag(Config2, mqtt_v5),
+    Config2.
 
 end_per_suite(Config) ->
     rabbit_ct_helpers:run_teardown_steps(Config,
       rabbit_ct_client_helpers:teardown_steps() ++
       rabbit_ct_broker_helpers:teardown_steps()).
 
-init_per_group(_, Config) ->
-    Config.
+init_per_group(Group, Config) ->
+    rabbit_ct_helpers:set_config(Config, {mqtt_version, Group}).
 
 end_per_group(_, Config) ->
     Config.
@@ -84,7 +91,6 @@ init_per_testcase(Testcase, Config) ->
 
 end_per_testcase(Testcase, Config) ->
     rabbit_ct_helpers:testcase_finished(Config, Testcase).
-
 
 %% -------------------------------------------------------------------
 %% Testsuite cases
@@ -102,7 +108,7 @@ block_connack_timeout(Config) ->
     {ok, Client} = emqtt:start_link([{host, "localhost"},
                                      {port, P},
                                      {clientid, atom_to_binary(?FUNCTION_NAME)},
-                                     {proto_ver, v4},
+                                     {proto_ver, ?config(mqtt_version, Config)},
                                      {connect_timeout, 1}]),
     unlink(Client),
     ClientMRef = monitor(process, Client),
@@ -184,9 +190,9 @@ set_env(QueueType) ->
 get_env() ->
     rabbit_mqtt_util:env(durable_queue_type).
 
-validate_durable_queue_type(Config, ClientName, CleanSession, ExpectedQueueType) ->
+validate_durable_queue_type(Config, ClientName, Opts, ExpectedQueueType) ->
     Server = rabbit_ct_broker_helpers:get_node_config(Config, 0, nodename),
-    C = connect(ClientName, Config, [{clean_start, CleanSession}]),
+    C = connect(ClientName, Config, Opts),
     {ok, _, _} = emqtt:subscribe(C, <<"TopicB">>, qos1),
     ok = emqtt:publish(C, <<"TopicB">>, <<"Payload">>),
     ok = expect_publishes(C, <<"TopicB">>, [<<"Payload">>]),
@@ -200,7 +206,8 @@ validate_durable_queue_type(Config, ClientName, CleanSession, ExpectedQueueType)
 quorum_clean_session_false(Config) ->
     Default = rpc(Config, reader_SUITE, get_env, []),
     rpc(Config, reader_SUITE, set_env, [quorum]),
-    validate_durable_queue_type(Config, <<"quorumCleanSessionFalse">>, false, rabbit_quorum_queue),
+    validate_durable_queue_type(
+      Config, <<"quorumCleanSessionFalse">>, non_clean_sess_opts(), rabbit_quorum_queue),
     rpc(Config, reader_SUITE, set_env, [Default]).
 
 quorum_clean_session_true(Config) ->
@@ -208,14 +215,17 @@ quorum_clean_session_true(Config) ->
     rpc(Config, reader_SUITE, set_env, [quorum]),
     %% Since we use a clean session and quorum queues cannot be auto-delete or exclusive,
     %% we expect a classic queue.
-    validate_durable_queue_type(Config, <<"quorumCleanSessionTrue">>, true, rabbit_classic_queue),
+    validate_durable_queue_type(
+      Config, <<"quorumCleanSessionTrue">>, [{clean_start, true}], rabbit_classic_queue),
     rpc(Config, reader_SUITE, set_env, [Default]).
 
 classic_clean_session_true(Config) ->
-    validate_durable_queue_type(Config, <<"classicCleanSessionTrue">>, true, rabbit_classic_queue).
+    validate_durable_queue_type(
+      Config, <<"classicCleanSessionTrue">>, [{clean_start, true}], rabbit_classic_queue).
 
 classic_clean_session_false(Config) ->
-    validate_durable_queue_type(Config, <<"classicCleanSessionFalse">>, false, rabbit_classic_queue).
+    validate_durable_queue_type(
+      Config, <<"classicCleanSessionFalse">>, non_clean_sess_opts(), rabbit_classic_queue).
 
 event_authentication_failure(Config) ->
     {ok, C} = emqtt:start_link(
@@ -224,7 +234,7 @@ event_authentication_failure(Config) ->
                  {host, "localhost"},
                  {port, rabbit_ct_broker_helpers:get_node_config(Config, 0, tcp_port_mqtt)},
                  {clientid, atom_to_binary(?FUNCTION_NAME)},
-                 {proto_ver, v4}]),
+                 {proto_ver, ?config(mqtt_version, Config)}]),
     true = unlink(C),
 
     ok = rabbit_ct_broker_helpers:add_code_path_to_all_nodes(Config, event_recorder),
@@ -233,7 +243,7 @@ event_authentication_failure(Config) ->
 
     ?assertMatch({error, _}, emqtt:connect(C)),
 
-    [E] = util:get_events(Server),
+    [E | _] = util:get_events(Server, user_authentication_failure),
     util:assert_event_type(user_authentication_failure, E),
     util:assert_event_prop([{name, <<"Trudy">>},
                             {connection_type, network}],
@@ -247,12 +257,12 @@ rabbit_mqtt_qos0_queue_overflow(Config) ->
     ok = rabbit_ct_broker_helpers:enable_feature_flag(Config, rabbit_mqtt_qos0_queue),
 
     Topic = atom_to_binary(?FUNCTION_NAME),
-    Msg = binary:copy(<<"x">>, 2000),
+    Msg = binary:copy(<<"x">>, 4000),
     NumMsgs = 10_000,
 
     %% Provoke TCP back-pressure from client to server by using very small buffers.
-    Opts = [{tcp_opts, [{recbuf, 512},
-                        {buffer, 512}]}],
+    Opts = [{tcp_opts, [{recbuf, 256},
+                        {buffer, 256}]}],
     Sub = connect(<<"subscriber">>, Config, Opts),
     {ok, _, [0]} = emqtt:subscribe(Sub, Topic, qos0),
     [ServerConnectionPid] = all_connection_pids(Config),

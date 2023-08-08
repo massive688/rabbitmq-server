@@ -23,11 +23,19 @@
          init_per_testcase/2,
          end_per_testcase/2,
 
+         start_slave_nodes/2,
+         stop_slave_nodes/1,
+         inject_on_nodes/2,
+         run_on_node/2,
+         connect_nodes/1,
+         override_running_nodes/1,
+
          mf_count_runs/1,
          mf_wait_and_count_runs_v2_enable/1,
          mf_wait_and_count_runs_v2_post_enable/1,
          mf_crash_on_joining_node/1,
 
+         rpc_calls/1,
          enable_unknown_feature_flag_on_a_single_node/1,
          enable_supported_feature_flag_on_a_single_node/1,
          enable_unknown_feature_flag_in_a_3node_cluster/1,
@@ -36,6 +44,7 @@
          enable_unsupported_feature_flag_in_a_3node_cluster/1,
          enable_feature_flag_in_cluster_and_add_member_after/1,
          enable_feature_flag_in_cluster_and_add_member_concurrently_mfv2/1,
+         enable_feature_flag_in_cluster_and_remove_member_concurrently_mfv2/0,
          enable_feature_flag_in_cluster_and_remove_member_concurrently_mfv2/1,
          enable_feature_flag_with_post_enable/1,
          have_required_feature_flag_in_cluster_and_add_member_with_it_disabled/1,
@@ -52,14 +61,29 @@ all() ->
     ].
 
 groups() ->
+    %% Don't run testcases in parallel when Bazel is used because they fail
+    %% with various system errors in CI, like the inability to spawn system
+    %% processes or to open a TCP port.
+    UsesBazel = case os:getenv("RABBITMQ_RUN") of
+                    false -> false;
+                    _     -> true
+                end,
+    GroupOptions = case UsesBazel of
+                       false -> [parallel];
+                       true  -> []
+                   end,
     Groups =
     [
-     {cluster_size_1, [parallel],
+     {direct, GroupOptions,
+      [
+       rpc_calls
+      ]},
+     {cluster_size_1, GroupOptions,
       [
        enable_unknown_feature_flag_on_a_single_node,
        enable_supported_feature_flag_on_a_single_node
       ]},
-     {cluster_size_3, [parallel],
+     {cluster_size_3, GroupOptions,
       [
        enable_unknown_feature_flag_in_a_3node_cluster,
        enable_supported_feature_flag_in_a_3node_cluster,
@@ -94,6 +118,8 @@ end_per_suite(Config) ->
 
 init_per_group(feature_flags_v2, Config) ->
     rabbit_ct_helpers:set_config(Config, {enable_feature_flags_v2, true});
+init_per_group(direct, Config) ->
+    Config;
 init_per_group(cluster_size_1, Config) ->
     rabbit_ct_helpers:set_config(Config, {nodes_count, 1});
 init_per_group(cluster_size_3, Config) ->
@@ -104,11 +130,15 @@ init_per_group(_Group, Config) ->
 end_per_group(_Group, Config) ->
     Config.
 
+init_per_testcase(rpc_calls, Config) ->
+    Config;
 init_per_testcase(Testcase, Config) ->
     rabbit_ct_helpers:run_steps(
       Config,
       [fun(Cfg) -> start_slave_nodes(Cfg, Testcase) end]).
 
+end_per_testcase(rpc_calls, Config) ->
+    Config;
 end_per_testcase(_Testcase, Config) ->
     rabbit_ct_helpers:run_steps(
       Config,
@@ -175,8 +205,10 @@ setup_slave_node(Config) ->
     ok = setup_logger(),
     ok = setup_data_dir(Config),
     ok = setup_feature_flags_file(Config),
+    _ = rabbit_ff_registry_factory:initialize_registry(),
     ok = start_controller(),
     ok = rabbit_feature_flags:enable(feature_flags_v2),
+    _ = catch rabbit_boot_state:set(ready),
     ok.
 
 setup_logger() ->
@@ -272,7 +304,12 @@ inject_on_nodes(Nodes, FeatureFlags) ->
            end,
            [])
          || Node <- Nodes],
-    ok.
+    run_on_node(
+      hd(Nodes),
+      fun() ->
+              rabbit_feature_flags:refresh_feature_flags_after_app_load()
+      end,
+      []).
 
 %% -------------------------------------------------------------------
 %% Migration functions.
@@ -325,6 +362,16 @@ get_peer_proc() ->
 %% -------------------------------------------------------------------
 %% Testcases.
 %% -------------------------------------------------------------------
+
+rpc_calls(_Config) ->
+    List = [1, 2, 3],
+    ?assertEqual(
+       lists:sum(List),
+       rabbit_ff_controller:rpc_call(node(), lists, sum, [List], 11000)),
+    ?assertEqual(
+       {error, {erpc, noconnection}},
+       rabbit_ff_controller:rpc_call(
+         nonode@non_existing_host, lists, sum, [List], 11000)).
 
 enable_unknown_feature_flag_on_a_single_node(Config) ->
     [Node] = ?config(nodes, Config),
@@ -419,7 +466,7 @@ enable_supported_feature_flag_in_a_3node_cluster(Config) ->
     FeatureName = ?FUNCTION_NAME,
     FeatureFlags = #{FeatureName => #{provided_by => rabbit,
                                       stability => stable}},
-    inject_on_nodes(Nodes, FeatureFlags),
+    ?assertEqual(ok, inject_on_nodes(Nodes, FeatureFlags)),
 
     ct:pal(
       "Checking the feature flag is supported but disabled on all nodes"),
@@ -469,7 +516,7 @@ enable_partially_supported_feature_flag_in_a_3node_cluster(Config) ->
     FeatureName = ?FUNCTION_NAME,
     FeatureFlags = #{FeatureName => #{provided_by => ?MODULE,
                                       stability => stable}},
-    inject_on_nodes([FirstNode], FeatureFlags),
+    ?assertEqual(ok, inject_on_nodes([FirstNode], FeatureFlags)),
 
     ct:pal(
       "Checking the feature flag is supported but disabled on all nodes"),
@@ -536,7 +583,7 @@ enable_unsupported_feature_flag_in_a_3node_cluster(Config) ->
     FeatureName = ?FUNCTION_NAME,
     FeatureFlags = #{FeatureName => #{provided_by => rabbit,
                                       stability => stable}},
-    inject_on_nodes([FirstNode], FeatureFlags),
+    ?assertEqual(ok, inject_on_nodes([FirstNode], FeatureFlags)),
 
     ct:pal(
       "Checking the feature flag is unsupported and disabled on all nodes"),
@@ -587,7 +634,7 @@ enable_feature_flag_in_cluster_and_add_member_after(Config) ->
                      #{provided_by => rabbit,
                        stability => stable,
                        callbacks => #{enable => {?MODULE, mf_count_runs}}}},
-    inject_on_nodes(AllNodes, FeatureFlags),
+    ?assertEqual(ok, inject_on_nodes(AllNodes, FeatureFlags)),
 
     ct:pal(
       "Checking the feature flag is supported but disabled on all nodes"),
@@ -691,7 +738,7 @@ enable_feature_flag_in_cluster_and_add_member_concurrently_mfv2(Config) ->
                        callbacks =>
                        #{enable =>
                          {?MODULE, mf_wait_and_count_runs_v2_enable}}}},
-    inject_on_nodes(AllNodes, FeatureFlags),
+    ?assertEqual(ok, inject_on_nodes(AllNodes, FeatureFlags)),
 
     ct:pal(
       "Checking the feature flag is supported but disabled on all nodes"),
@@ -863,6 +910,9 @@ enable_feature_flag_in_cluster_and_add_member_concurrently_mfv2(Config) ->
          || Node <- AllNodes],
     ok.
 
+enable_feature_flag_in_cluster_and_remove_member_concurrently_mfv2() ->
+    [{timetrap, {minutes, 3}}].
+
 enable_feature_flag_in_cluster_and_remove_member_concurrently_mfv2(Config) ->
     AllNodes = [LeavingNode | [FirstNode | _] = Nodes] = ?config(
                                                             nodes, Config),
@@ -876,7 +926,7 @@ enable_feature_flag_in_cluster_and_remove_member_concurrently_mfv2(Config) ->
                        callbacks =>
                        #{enable =>
                          {?MODULE, mf_wait_and_count_runs_v2_enable}}}},
-    inject_on_nodes(AllNodes, FeatureFlags),
+    ?assertEqual(ok, inject_on_nodes(AllNodes, FeatureFlags)),
 
     ct:pal(
       "Checking the feature flag is supported but disabled on all nodes"),
@@ -995,7 +1045,7 @@ enable_feature_flag_with_post_enable(Config) ->
                        callbacks =>
                        #{post_enable =>
                          {?MODULE, mf_wait_and_count_runs_v2_post_enable}}}},
-    inject_on_nodes(AllNodes, FeatureFlags),
+    ?assertEqual(ok, inject_on_nodes(AllNodes, FeatureFlags)),
 
     ct:pal(
       "Checking the feature flag is supported but disabled on all nodes"),
@@ -1180,8 +1230,8 @@ have_required_feature_flag_in_cluster_and_add_member_with_it_disabled(
     RequiredFeatureFlags = #{FeatureName =>
                              #{provided_by => rabbit,
                                stability => required}},
-    inject_on_nodes([NewNode], FeatureFlags),
-    inject_on_nodes(Nodes, RequiredFeatureFlags),
+    ?assertEqual(ok, inject_on_nodes([NewNode], FeatureFlags)),
+    ?assertEqual(ok, inject_on_nodes(Nodes, RequiredFeatureFlags)),
 
     ct:pal(
       "Checking the feature flag is supported everywhere but enabled on the "
@@ -1263,8 +1313,8 @@ have_required_feature_flag_in_cluster_and_add_member_without_it(
     RequiredFeatureFlags = #{FeatureName =>
                              #{provided_by => rabbit,
                                stability => required}},
-    inject_on_nodes([NewNode], FeatureFlags),
-    inject_on_nodes(Nodes, RequiredFeatureFlags),
+    ?assertEqual(ok, inject_on_nodes([NewNode], FeatureFlags)),
+    ?assertEqual(ok, inject_on_nodes(Nodes, RequiredFeatureFlags)),
 
     ct:pal(
       "Checking the feature flag is supported and enabled on existing the "
@@ -1359,7 +1409,7 @@ error_during_migration_after_initial_success(Config) ->
                        stability => stable,
                        callbacks =>
                        #{enable => {?MODULE, mf_crash_on_joining_node}}}},
-    inject_on_nodes(AllNodes, FeatureFlags),
+    ?assertEqual(ok, inject_on_nodes(AllNodes, FeatureFlags)),
 
     ct:pal(
       "Checking the feature flag is supported but disabled on all nodes"),

@@ -168,7 +168,32 @@ port_command(Sock, Data) when ?IS_SSL(Sock) ->
         {error, Reason} -> erlang:error(Reason)
     end;
 port_command(Sock, Data) when is_port(Sock) ->
-    erlang:port_command(Sock, Data).
+    Fun = case persistent_term:get(rabbit_net_tcp_send, undefined) of
+              undefined ->
+                  Rel = list_to_integer(erlang:system_info(otp_release)),
+                  %% gen_tcp:send/2 does a selective receive of
+                  %% {inet_reply, Sock, Status[, CallerTag]}
+                  F = if Rel >= 26 ->
+                             %% Selective receive is optimised:
+                             %% https://github.com/erlang/otp/issues/6455
+                             fun gen_tcp_send/2;
+                         Rel < 26 ->
+                             %% Avoid costly selective receive.
+                             fun erlang:port_command/2
+                      end,
+                  ok = persistent_term:put(rabbit_net_tcp_send, F),
+                  F;
+              F ->
+                  F
+          end,
+    Fun(Sock, Data).
+
+gen_tcp_send(Sock, Data) ->
+    case gen_tcp:send(Sock, Data) of
+        ok -> self() ! {inet_reply, Sock, ok},
+              true;
+        {error, Reason} -> erlang:error(Reason)
+    end.
 
 getopts(Sock, Options) when ?IS_SSL(Sock) ->
     ssl:getopts(Sock, Options);
@@ -244,15 +269,21 @@ socket_ends(Sock, Direction) when ?IS_SSL(Sock);
         {_, {error, _Reason} = Error} ->
             Error
     end;
-socket_ends({rabbit_proxy_socket, _, ProxyInfo}, _) ->
-    #{
-      src_address := FromAddress,
-      src_port := FromPort,
-      dest_address := ToAddress,
-      dest_port := ToPort
-     } = ProxyInfo,
-    {ok, {rdns(FromAddress), FromPort,
-          rdns(ToAddress),   ToPort}}.
+socket_ends({rabbit_proxy_socket, Sock, ProxyInfo}, Direction) ->
+    case ProxyInfo of
+        %% LOCAL header: we take the IP/ports from the socket.
+        #{command := local} ->
+            socket_ends(Sock, Direction);
+        %% PROXY header: use the IP/ports from the proxy header.
+        #{
+          src_address := FromAddress,
+          src_port := FromPort,
+          dest_address := ToAddress,
+          dest_port := ToPort
+         } ->
+            {ok, {rdns(FromAddress), FromPort,
+                  rdns(ToAddress),   ToPort}}
+    end.
 
 maybe_ntoab(Addr) when is_tuple(Addr) -> rabbit_misc:ntoab(Addr);
 maybe_ntoab(Host)                     -> Host.

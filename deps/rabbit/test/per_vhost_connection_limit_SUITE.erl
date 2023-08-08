@@ -407,8 +407,8 @@ cluster_node_list_on_node(Config) ->
 
     rabbit_ct_broker_helpers:stop_broker(Config, 1),
 
-    ?awaitMatch(2, length(all_connections(Config)), 1000),
-    ?assertEqual(0, length(connections_on_node(Config, 0, B))),
+    ?awaitMatch(2, length(all_connections(Config)), ?AWAIT, ?INTERVAL),
+    ?awaitMatch(0, length(connections_on_node(Config, 0, B)), ?AWAIT, ?INTERVAL),
 
     close_connections([Conn3, Conn5]),
     ?awaitMatch(0, length(all_connections(Config, 0)), ?AWAIT, ?INTERVAL),
@@ -657,6 +657,17 @@ cluster_multiple_vhosts_zero_limit(Config) ->
 vhost_limit_after_node_renamed(Config) ->
     A = rabbit_ct_broker_helpers:get_node_config(Config, 0, nodename),
 
+    %% Make sure the maintenance mode states Mnesia table is replicated
+    %% everywhere. We do this here, just in case mixed-version testing is
+    %% against a version of RabbitMQ that doesn't have the fix yet.
+    %%
+    %% See https://github.com/rabbitmq/rabbitmq-server/pull/9005.
+    B = rabbit_ct_broker_helpers:get_node_config(Config, 1, nodename),
+    rabbit_ct_broker_helpers:rpc(
+      Config, B,
+      rabbit_table, ensure_table_copy,
+      [rabbit_node_maintenance_states, B, ram_copies]),
+
     VHost = <<"/renaming_node">>,
     set_up_vhost(Config, VHost),
     set_vhost_connection_limit(Config, VHost, 2),
@@ -714,7 +725,6 @@ kill_connections(Conns) ->
 count_connections_in(Config, VHost) ->
     count_connections_in(Config, VHost, 0).
 count_connections_in(Config, VHost, NodeIndex) ->
-    timer:sleep(200),
     rabbit_ct_broker_helpers:rpc(Config, NodeIndex,
                                  rabbit_connection_tracking,
                                  count_tracked_items_in, [{vhost, VHost}]).

@@ -861,8 +861,10 @@ state_enter0(leader, #?MODULE{consumers = Cons,
     Mons = [{monitor, process, P} || P <- Pids],
     Nots = [{send_msg, P, leader_change, ra_event} || P <- Pids],
     NodeMons = lists:usort([{monitor, node, node(P)} || P <- Pids]),
-    FHReservation = [{mod_call, rabbit_quorum_queue, file_handle_leader_reservation, [Resource]}],
-    Effects = TimerEffs ++ Mons ++ Nots ++ NodeMons ++ FHReservation,
+    FHReservation = [{mod_call, rabbit_quorum_queue,
+                      file_handle_leader_reservation, [Resource]}],
+    NotifyDecs = notify_decorators_startup(Resource),
+    Effects = TimerEffs ++ Mons ++ Nots ++ NodeMons ++ FHReservation ++ [NotifyDecs],
     case BLH of
         undefined ->
             Effects;
@@ -896,8 +898,7 @@ tick(Ts, #?MODULE{cfg = #cfg{name = _Name,
         true ->
             [{mod_call, rabbit_quorum_queue, spawn_deleter, [QName]}];
         false ->
-            [{mod_call, rabbit_quorum_queue,
-              handle_tick, [QName, overview(State), all_nodes(State)]}]
+            [{aux, {handle_tick, [QName, overview(State), all_nodes(State)]}}]
     end.
 
 -spec overview(state()) -> map().
@@ -980,7 +981,7 @@ which_module(3) -> ?MODULE.
                last_decorators_state :: term(),
                capacity :: term(),
                gc = #aux_gc{} :: #aux_gc{},
-               unused,
+               tick_pid,
                unused2}).
 
 init_aux(Name) when is_atom(Name) ->
@@ -1004,8 +1005,8 @@ handle_aux(leader, _, garbage_collection, Aux, Log, MacState) ->
     {no_reply, force_eval_gc(Log, MacState, Aux), Log};
 handle_aux(follower, _, garbage_collection, Aux, Log, MacState) ->
     {no_reply, force_eval_gc(Log, MacState, Aux), Log};
-handle_aux(leader, cast, {#return{msg_ids = MsgIds,
-                                  consumer_id = ConsumerId}, Corr, Pid},
+handle_aux(_RaftState, cast, {#return{msg_ids = MsgIds,
+                                      consumer_id = ConsumerId}, Corr, Pid},
            Aux0, Log0, #?MODULE{cfg = #cfg{delivery_limit = undefined},
                                 consumers = Consumers}) ->
     case Consumers of
@@ -1030,6 +1031,19 @@ handle_aux(leader, cast, {#return{msg_ids = MsgIds,
         _ ->
             {no_reply, Aux0, Log0}
     end;
+handle_aux(leader, _, {handle_tick, [QName, Overview, Nodes]},
+           #?AUX{tick_pid = Pid} = Aux, Log, _) ->
+    NewPid =
+        case process_is_alive(Pid) of
+            false ->
+                %% No active TICK pid
+                %% this function spawns and returns the tick process pid
+                rabbit_quorum_queue:handle_tick(QName, Overview, Nodes);
+            true ->
+                %% Active TICK pid, do nothing
+                Pid
+        end,
+    {no_reply, Aux#?AUX{tick_pid = NewPid}, Log};
 handle_aux(_, _, {get_checked_out, ConsumerId, MsgIds},
            Aux0, Log0, #?MODULE{cfg = #cfg{},
                                 consumers = Consumers}) ->
@@ -1152,6 +1166,10 @@ force_eval_gc(Log, #?MODULE{cfg = #cfg{resource = QR}},
             AuxState
     end.
 
+process_is_alive(Pid) when is_pid(Pid) ->
+    is_process_alive(Pid);
+process_is_alive(_) ->
+    false.
 %%% Queries
 
 query_messages_ready(State) ->
@@ -1284,9 +1302,8 @@ query_notify_decorators_info(#?MODULE{consumers = Consumers} = State) ->
     MaxActivePriority = maps:fold(
                           fun(_, #consumer{credit = C,
                                            status = up,
-                                           cfg = #consumer_cfg{priority = P0}},
+                                           cfg = #consumer_cfg{priority = P}},
                               MaxP) when C > 0 ->
-                                  P = -P0,
                                   case MaxP of
                                       empty -> P;
                                       MaxP when MaxP > P -> MaxP;
@@ -2461,6 +2478,10 @@ get_priority_from_args(_) ->
 notify_decorators_effect(QName, MaxActivePriority, IsEmpty) ->
     {mod_call, rabbit_quorum_queue, spawn_notify_decorators,
      [QName, consumer_state_changed, [MaxActivePriority, IsEmpty]]}.
+
+notify_decorators_startup(QName) ->
+    {mod_call, rabbit_quorum_queue, spawn_notify_decorators,
+     [QName, startup, []]}.
 
 convert(To, To, State) ->
     State;

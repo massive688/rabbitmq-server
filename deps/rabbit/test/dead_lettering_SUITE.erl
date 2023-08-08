@@ -9,7 +9,6 @@
 -module(dead_lettering_SUITE).
 
 -include_lib("common_test/include/ct.hrl").
--include_lib("kernel/include/file.hrl").
 -include_lib("amqp_client/include/amqp_client.hrl").
 -include_lib("eunit/include/eunit.hrl").
 -include_lib("rabbitmq_ct_helpers/include/rabbit_assert.hrl").
@@ -188,13 +187,14 @@ init_per_testcase(Testcase, Config) ->
     rabbit_ct_helpers:testcase_started(Config1, Testcase).
 
 end_per_testcase(Testcase, Config) ->
+    rabbit_ct_broker_helpers:rpc(Config, 0, ?MODULE, delete_queues, []),
     {_, Ch} = rabbit_ct_client_helpers:open_connection_and_channel(Config, 0),
-    amqp_channel:call(Ch, #'queue.delete'{queue = ?config(queue_name, Config)}),
-    amqp_channel:call(Ch, #'queue.delete'{queue = ?config(queue_name_dlx, Config)}),
-    amqp_channel:call(Ch, #'queue.delete'{queue = ?config(queue_name_dlx_2, Config)}),
     amqp_channel:call(Ch, #'exchange.delete'{exchange = ?config(dlx_exchange, Config)}),
     _ = rabbit_ct_broker_helpers:clear_policy(Config, 0, ?config(policy, Config)),
     rabbit_ct_helpers:testcase_finished(Config, Testcase).
+
+delete_queues() ->
+    [rabbit_amqqueue:delete(Q, false, false, <<"tests">>) || Q <- rabbit_amqqueue:list()].
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %% Dead letter exchanges
@@ -850,7 +850,15 @@ dead_letter_policy(Config) ->
                                              <<"queues">>,
                                              [{<<"dead-letter-exchange">>, DLXExchange},
                                               {<<"dead-letter-routing-key">>, DLXQName}]),
-    timer:sleep(1000),
+    ?awaitMatch([_ | _],
+                begin
+                    {ok, Q0} = rabbit_ct_broker_helpers:rpc(
+                                 Config, 0,
+                                 rabbit_amqqueue, lookup,
+                                 [rabbit_misc:r(<<"/">>, queue, QName)], infinity),
+                    amqqueue:get_policy(Q0)
+                end,
+                30000),
     %% Nack the second message
     amqp_channel:cast(Ch, #'basic.nack'{delivery_tag = DTag2,
                                         multiple     = false,
@@ -1034,6 +1042,7 @@ dead_letter_headers_cycle(Config) ->
     publish(Ch, QName, [P]),
     wait_for_messages(Config, [[QName, <<"1">>, <<"1">>, <<"0">>]]),
     [DTag] = consume(Ch, QName, [P]),
+    wait_for_messages(Config, [[QName, <<"1">>, <<"0">>, <<"1">>]]),
     amqp_channel:cast(Ch, #'basic.nack'{delivery_tag = DTag,
                                         multiple     = false,
                                         requeue      = false}),
@@ -1044,6 +1053,7 @@ dead_letter_headers_cycle(Config) ->
     {array, [{table, Death1}]} = rabbit_misc:table_lookup(Headers1, <<"x-death">>),
     ?assertEqual({long, 1}, rabbit_misc:table_lookup(Death1, <<"count">>)),
 
+    wait_for_messages(Config, [[QName, <<"1">>, <<"0">>, <<"1">>]]),
     amqp_channel:cast(Ch, #'basic.nack'{delivery_tag = DTag1,
                                         multiple     = false,
                                         requeue      = false}),
@@ -1319,7 +1329,12 @@ dead_letter_headers_first_death_route(Config) ->
     %% Send and reject the 3rd message.
     P3 = <<"msg3">>,
     publish(Ch, QName2, [P3]),
-    timer:sleep(1000),
+    case group_name(Config) of
+        at_most_once ->
+            wait_for_messages(Config, [[QName2, <<"1">>, <<"1">>, <<"0">>]]);
+        at_least_once ->
+            wait_for_messages(Config, [[QName2, <<"2">>, <<"1">>, <<"0">>]])
+    end,
     [DTag] = consume(Ch, QName2, [P3]),
     amqp_channel:cast(Ch, #'basic.reject'{delivery_tag = DTag,
                                           requeue      = false}),
@@ -1340,7 +1355,7 @@ dead_letter_extra_bcc(Config) ->
     declare_dead_letter_queues(Ch, Config, SourceQ, TargetQ, [{<<"x-message-ttl">>, long, 0}]),
     #'queue.declare_ok'{} = amqp_channel:call(Ch, #'queue.declare'{queue = ExtraBCCQ,
                                                                    durable = Durable}),
-    rabbit_ct_broker_helpers:rpc(Config, 0, ?MODULE, set_queue_options,
+    rabbit_ct_broker_helpers:rpc(Config, ?MODULE, set_queue_options,
                                  [TargetQ, #{extra_bcc => ExtraBCCQ}]),
     %% Publish message
     P = <<"msg">>,
@@ -1480,7 +1495,7 @@ sync_mirrors(QName, Config) ->
     end.
 
 get_global_counters(Config) ->
-    rabbit_ct_broker_helpers:rpc(Config, 0, rabbit_global_counters, overview, []).
+    rabbit_ct_broker_helpers:rpc(Config, rabbit_global_counters, overview, []).
 
 %% Returns the delta of Metric between testcase start and now.
 counted(Metric, Config) ->

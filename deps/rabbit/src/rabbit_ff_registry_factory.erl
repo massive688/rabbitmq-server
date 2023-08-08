@@ -12,14 +12,18 @@
 
 -include_lib("rabbit_common/include/logging.hrl").
 
+-include("src/rabbit_feature_flags.hrl").
+
 -export([initialize_registry/0,
          initialize_registry/1,
          initialize_registry/3,
          acquire_state_change_lock/0,
-         release_state_change_lock/0]).
+         release_state_change_lock/0,
+         reset_registry/0]).
 
 -ifdef(TEST).
--export([registry_loading_lock/0]).
+-export([registry_loading_lock/0,
+         purge_old_registry/1]).
 -endif.
 
 -define(FF_STATE_CHANGE_LOCK, {feature_flags_state_change, self()}).
@@ -27,28 +31,32 @@
 
 -type registry_vsn() :: term().
 
--spec acquire_state_change_lock() -> boolean().
+-spec acquire_state_change_lock() -> ok.
+
 acquire_state_change_lock() ->
     ?LOG_DEBUG(
       "Feature flags: acquiring lock ~tp",
       [?FF_STATE_CHANGE_LOCK],
       #{domain => ?RMQLOG_DOMAIN_FEAT_FLAGS}),
-    Ret = global:set_lock(?FF_STATE_CHANGE_LOCK),
+    true = global:set_lock(?FF_STATE_CHANGE_LOCK),
     ?LOG_DEBUG(
       "Feature flags: acquired lock ~tp",
       [?FF_STATE_CHANGE_LOCK],
       #{domain => ?RMQLOG_DOMAIN_FEAT_FLAGS}),
-    Ret.
+    ok.
 
--spec release_state_change_lock() -> true.
+-spec release_state_change_lock() -> ok.
+
 release_state_change_lock() ->
     ?LOG_DEBUG(
       "Feature flags: releasing lock ~tp",
       [?FF_STATE_CHANGE_LOCK],
       #{domain => ?RMQLOG_DOMAIN_FEAT_FLAGS}),
-    global:del_lock(?FF_STATE_CHANGE_LOCK).
+    true = global:del_lock(?FF_STATE_CHANGE_LOCK),
+    ok.
 
--spec initialize_registry() -> ok | {error, any()} | no_return().
+-spec initialize_registry() -> Ret when
+      Ret :: ok | {error, any()} | no_return().
 %% @private
 %% @doc
 %% Initializes or reinitializes the registry.
@@ -69,8 +77,9 @@ release_state_change_lock() ->
 initialize_registry() ->
     initialize_registry(#{}).
 
--spec initialize_registry(rabbit_feature_flags:feature_flags()) ->
-    ok | {error, any()} | no_return().
+-spec initialize_registry(FeatureFlags) -> Ret when
+      FeatureFlags :: rabbit_feature_flags:feature_flags(),
+      Ret :: ok | {error, any()} | no_return().
 %% @private
 %% @doc
 %% Initializes or reinitializes the registry.
@@ -105,8 +114,9 @@ initialize_registry(NewSupportedFeatureFlags) ->
     RegistryInitialized = rabbit_ff_registry:is_registry_initialized(),
     FeatureStates = case RegistryInitialized of
                         true ->
-                            CurrentFeatureStates = rabbit_ff_registry:states(),
-                            maps:merge(FeatureStates0, CurrentFeatureStates);
+                            maps:merge(
+                              FeatureStates0,
+                              rabbit_ff_registry_wrapper:states());
                         false ->
                             FeatureStates0
                     end,
@@ -135,10 +145,13 @@ initialize_registry(NewSupportedFeatureFlags) ->
 enabled_feature_flags_to_feature_states(FeatureNames) ->
     maps:from_list([{FeatureName, true} || FeatureName <- FeatureNames]).
 
--spec initialize_registry(rabbit_feature_flags:feature_flags(),
-                          rabbit_feature_flags:feature_states(),
-                          boolean()) ->
-    ok | {error, any()} | no_return().
+-spec initialize_registry(FeatureFlags,
+                          FeatureStates,
+                          WrittenToDisk) -> Ret when
+      FeatureFlags :: rabbit_feature_flags:feature_flags(),
+      FeatureStates :: rabbit_feature_flags:feature_states(),
+      WrittenToDisk :: boolean(),
+      Ret :: ok | {error, any()} | no_return().
 %% @private
 %% @doc
 %% Initializes or reinitializes the registry.
@@ -173,10 +186,13 @@ initialize_registry(NewSupportedFeatureFlags,
             Error2
     end.
 
--spec maybe_initialize_registry(rabbit_feature_flags:feature_flags(),
-                                rabbit_feature_flags:feature_states(),
-                                boolean()) ->
-    ok | restart | {error, any()} | no_return().
+-spec maybe_initialize_registry(FeatureFlags,
+                                FeatureStates,
+                                WrittenToDisk) -> Ret when
+      FeatureFlags :: rabbit_feature_flags:feature_flags(),
+      FeatureStates :: rabbit_feature_flags:feature_states(),
+      WrittenToDisk :: boolean(),
+      Ret :: ok | restart | {error, any()} | no_return().
 
 maybe_initialize_registry(NewSupportedFeatureFlags,
                           NewFeatureStates,
@@ -190,7 +206,7 @@ maybe_initialize_registry(NewSupportedFeatureFlags,
     %% We take the feature flags already registered.
     RegistryInitialized = rabbit_ff_registry:is_registry_initialized(),
     KnownFeatureFlags1 = case RegistryInitialized of
-                             true  -> rabbit_ff_registry:list(all);
+                             true  -> rabbit_ff_registry_wrapper:list(all);
                              false -> #{}
                          end,
 
@@ -238,58 +254,73 @@ maybe_initialize_registry(NewSupportedFeatureFlags,
     not rabbit_feature_flags:does_enabled_feature_flags_list_file_exist(),
     FeatureStates0 = case RegistryInitialized of
                          true ->
-                             maps:merge(rabbit_ff_registry:states(),
-                                        NewFeatureStates);
+                             maps:merge(
+                               rabbit_ff_registry_wrapper:states(),
+                               NewFeatureStates);
                          false ->
                              NewFeatureStates
                      end,
-    FeatureStates = maps:map(
-                      fun(FeatureName, FeatureProps) ->
-                              Stability = maps:get(
-                                            stability, FeatureProps, stable),
-                              ProvidedBy = maps:get(
-                                             provided_by, FeatureProps),
-                              State = case FeatureStates0 of
-                                          #{FeatureName := FeatureState} ->
-                                              FeatureState;
-                                          _ ->
-                                              false
-                                      end,
-                              case Stability of
-                                  required when State =:= true ->
-                                      %% The required feature flag is already
-                                      %% enabled, we keep it this way.
-                                      State;
-                                  required when NewNode ->
-                                      %% This is the very first time the node
-                                      %% starts, we already mark the required
-                                      %% feature flag as enabled.
-                                      ?assertNotEqual(state_changing, State),
-                                      true;
-                                  required when ProvidedBy =/= rabbit ->
-                                      ?assertNotEqual(state_changing, State),
-                                      true;
-                                  required ->
-                                      %% This is not a new node and the
-                                      %% required feature flag is disabled.
-                                      %% This is an error and RabbitMQ must be
-                                      %% downgraded to enable the feature
-                                      %% flag.
-                                      ?assertNotEqual(state_changing, State),
-                                      ?LOG_ERROR(
-                                        "Feature flags: `~ts`: required "
-                                        "feature flag not enabled! It must "
-                                        "be enabled before upgrading "
-                                        "RabbitMQ.",
-                                        [FeatureName],
-                                        #{domain => ?RMQLOG_DOMAIN_FEAT_FLAGS}),
-                                      throw({error,
-                                             {disabled_required_feature_flag,
-                                              FeatureName}});
-                                  _ ->
-                                      State
-                              end
-                      end, AllFeatureFlags),
+    FeatureStates1 =
+    maps:map(
+      fun
+          (FeatureName, FeatureProps) when ?IS_FEATURE_FLAG(FeatureProps) ->
+              Stability = rabbit_feature_flags:get_stability(FeatureProps),
+              ProvidedBy = maps:get(provided_by, FeatureProps),
+              State = case FeatureStates0 of
+                          #{FeatureName := FeatureState} -> FeatureState;
+                          _                              -> false
+                      end,
+              case Stability of
+                  required when State =:= true ->
+                      %% The required feature flag is already enabled, we keep
+                      %% it this way.
+                      State;
+                  required when NewNode ->
+                      %% This is the very first time the node starts, we
+                      %% already mark the required feature flag as enabled.
+                      ?assertNotEqual(state_changing, State),
+                      true;
+                  required when ProvidedBy =/= rabbit ->
+                      ?assertNotEqual(state_changing, State),
+                      true;
+                  required ->
+                      %% This is not a new node and the required feature flag
+                      %% is disabled. This is an error and RabbitMQ must be
+                      %% downgraded to enable the feature flag.
+                      ?assertNotEqual(state_changing, State),
+                      ?LOG_ERROR(
+                         "Feature flags: `~ts`: required feature flag not "
+                         "enabled! It must be enabled before upgrading "
+                         "RabbitMQ.",
+                         [FeatureName],
+                         #{domain => ?RMQLOG_DOMAIN_FEAT_FLAGS}),
+                      throw({error,
+                             {disabled_required_feature_flag,
+                              FeatureName}});
+                  _ ->
+                      State
+              end;
+          (FeatureName, FeatureProps) when ?IS_DEPRECATION(FeatureProps) ->
+              case FeatureStates0 of
+                  #{FeatureName := FeatureState} ->
+                      FeatureState;
+                  _ ->
+                      not rabbit_deprecated_features:should_be_permitted(
+                            FeatureName, FeatureProps)
+              end
+      end, AllFeatureFlags),
+
+    %% We don't record the state of deprecated features because it is
+    %% controlled from configuration and they can be disabled (the deprecated
+    %% feature can be turned back on) if the deprecated feature allows it.
+    %%
+    %% However, some feature flags may depend on deprecated features. If those
+    %% feature flags are enabled, we need to enable the deprecated features
+    %% (turn off the deprecated features) they depend on regardless of the
+    %% configuration.
+    FeatureStates =
+    enable_deprecated_features_required_by_enabled_feature_flags(
+      AllFeatureFlags, FeatureStates1),
 
     %% The feature flags inventory is used by rabbit_ff_controller to query
     %% feature flags atomically. The inventory also contains the list of
@@ -329,10 +360,13 @@ maybe_initialize_registry(NewSupportedFeatureFlags,
             ok
     end.
 
--spec does_registry_need_refresh(rabbit_feature_flags:feature_flags(),
-                                 rabbit_feature_flags:feature_states(),
-                                 boolean()) ->
-    boolean().
+-spec does_registry_need_refresh(FeatureFlags,
+                                 FeatureStates,
+                                 WrittenToDisk) -> Ret when
+      FeatureFlags :: rabbit_feature_flags:feature_flags(),
+      FeatureStates :: rabbit_feature_flags:feature_states(),
+      WrittenToDisk :: boolean(),
+      Ret :: boolean().
 
 does_registry_need_refresh(AllFeatureFlags,
                            FeatureStates,
@@ -342,8 +376,8 @@ does_registry_need_refresh(AllFeatureFlags,
             %% Before proceeding with the actual
             %% (re)initialization, let's see if there are any
             %% changes.
-            CurrentAllFeatureFlags = rabbit_ff_registry:list(all),
-            CurrentFeatureStates = rabbit_ff_registry:states(),
+            CurrentAllFeatureFlags = rabbit_ff_registry_wrapper:list(all),
+            CurrentFeatureStates = rabbit_ff_registry_wrapper:states(),
             CurrentWrittenToDisk =
             rabbit_ff_registry:is_registry_written_to_disk(),
 
@@ -380,12 +414,50 @@ does_registry_need_refresh(AllFeatureFlags,
             true
     end.
 
--spec do_initialize_registry(registry_vsn(),
-                             rabbit_feature_flags:feature_flags(),
-                             rabbit_feature_flags:feature_states(),
-                             rabbit_feature_flags:inventory(),
-                             boolean()) ->
-    ok | restart | {error, any()} | no_return().
+-spec enable_deprecated_features_required_by_enabled_feature_flags(
+        FeatureFlags, FeatureStates) -> NewFeatureStates when
+      FeatureFlags :: rabbit_feature_flags:feature_flags(),
+      FeatureStates :: rabbit_feature_flags:feature_states(),
+      NewFeatureStates :: rabbit_feature_flags:feature_states().
+
+enable_deprecated_features_required_by_enabled_feature_flags(
+  FeatureFlags, FeatureStates) ->
+    FeatureStates1 =
+    maps:map(
+      fun
+          (DependencyName, false) ->
+              RequiredBy =
+              maps:filter(
+                fun
+                    (FeatureName, #{depends_on := DependsOn}) ->
+                        lists:member(DependencyName, DependsOn) andalso
+                        maps:get(FeatureName, FeatureStates) =:= true;
+                    (_FeatureName, _FeatureProps) ->
+                        false
+                end, FeatureFlags),
+              maps:size(RequiredBy) > 0;
+          (_DependencyName, State) ->
+              State
+      end, FeatureStates),
+    case FeatureStates1 of
+        FeatureStates ->
+            FeatureStates;
+        _ ->
+            enable_deprecated_features_required_by_enabled_feature_flags(
+              FeatureFlags, FeatureStates1)
+    end.
+
+-spec do_initialize_registry(Vsn,
+                             FeatureFlags,
+                             FeatureStates,
+                             Inventory,
+                             WrittenToDisk) -> Ret when
+      Vsn :: registry_vsn(),
+      FeatureFlags :: rabbit_feature_flags:feature_flags(),
+      FeatureStates :: rabbit_feature_flags:feature_states(),
+      Inventory :: rabbit_feature_flags:inventory(),
+      WrittenToDisk :: boolean(),
+      Ret :: ok | restart | {error, any()} | no_return().
 %% @private
 
 do_initialize_registry(RegistryVsn,
@@ -395,8 +467,8 @@ do_initialize_registry(RegistryVsn,
                        WrittenToDisk) ->
     %% We log the state of those feature flags.
     ?LOG_DEBUG(
-      "Feature flags: list of feature flags found:\n" ++
       lists:flatten(
+        "Feature flags: list of feature flags found:\n" ++
         [io_lib:format(
            "Feature flags:   [~ts] ~ts~n",
            [case maps:get(FeatureName, FeatureStates, false) of
@@ -405,7 +477,19 @@ do_initialize_registry(RegistryVsn,
                 false          -> " "
             end,
             FeatureName])
-         || FeatureName <- lists:sort(maps:keys(AllFeatureFlags))] ++
+         || FeatureName <- lists:sort(maps:keys(AllFeatureFlags)),
+            ?IS_FEATURE_FLAG(maps:get(FeatureName, AllFeatureFlags))] ++
+        "Feature flags: list of deprecated features found:\n" ++
+        [io_lib:format(
+           "Feature flags:   [~ts] ~ts~n",
+           [case maps:get(FeatureName, FeatureStates, false) of
+                true           -> "x";
+                state_changing -> "~";
+                false          -> " "
+            end,
+            FeatureName])
+         || FeatureName <- lists:sort(maps:keys(AllFeatureFlags)),
+            ?IS_DEPRECATION(maps:get(FeatureName, AllFeatureFlags))] ++
         [io_lib:format(
            "Feature flags: scanned applications: ~tp~n"
            "Feature flags: feature flag states written to disk: ~ts",
@@ -663,8 +747,11 @@ maybe_log_registry_source_code(Forms) ->
 registry_loading_lock() -> ?FF_REGISTRY_LOADING_LOCK.
 -endif.
 
--spec load_registry_mod(registry_vsn(), module(), binary()) ->
-    ok | restart | no_return().
+-spec load_registry_mod(Vsn, Mod, Bin) -> Ret when
+      Vsn :: registry_vsn(),
+      Mod :: module(),
+      Bin :: binary(),
+      Ret :: ok | restart | no_return().
 %% @private
 
 load_registry_mod(RegistryVsn, Mod, Bin) ->
@@ -726,7 +813,8 @@ load_registry_mod(RegistryVsn, Mod, Bin) ->
             throw({feature_flag_registry_reload_failure, Reason})
     end.
 
--spec registry_vsn() -> registry_vsn().
+-spec registry_vsn() -> Vsn when
+      Vsn :: registry_vsn().
 %% @private
 
 registry_vsn() ->
@@ -744,3 +832,15 @@ do_purge_old_registry(Mod) ->
         true  -> ok;
         false -> do_purge_old_registry(Mod)
     end.
+
+-spec reset_registry() -> ok.
+
+reset_registry() ->
+    ?LOG_DEBUG(
+       "Feature flags: resetting loaded registry",
+       [],
+       #{domain => ?RMQLOG_DOMAIN_FEAT_FLAGS}),
+    _ = code:purge(rabbit_ff_registry),
+    _ = code:delete(rabbit_ff_registry),
+    ?assertNot(rabbit_ff_registry:is_registry_initialized()),
+    ok.

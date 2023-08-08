@@ -897,9 +897,8 @@ exec([Cmd | Args], Options) when is_list(Cmd) orelse is_binary(Cmd) ->
                | proplists:delete(env, PortOptions1)],
               Log ++ "~n~nEnvironment variables:~n" ++
               string:join(
-                [string:replace(
-                   rabbit_misc:format("  ~ts=~ts", [K, V]),
-                   "~", "~~", all) || {K, V} <- Env1],
+                [rabbit_misc:format("  ~ts=~ts", [K, string:replace(V, "~", "~~", all)])
+                 || {K, V} <- Env1],
                 "~n")
             }
     end,
@@ -1097,7 +1096,7 @@ eventually({Line, _}, _, 0) ->
 eventually({Line, Assertion} = TestObj, PollInterval, PollCount)
   when is_integer(Line), Line >= 0, is_function(Assertion, 0),
        is_integer(PollInterval), PollInterval >= 0,
-       is_integer(PollCount), PollCount >= 0 ->
+       is_integer(PollCount), PollCount > 0 ->
     case catch Assertion() of
         ok ->
             ok;

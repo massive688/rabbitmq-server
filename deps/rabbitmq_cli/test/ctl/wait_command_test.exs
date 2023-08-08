@@ -2,7 +2,7 @@
 ## License, v. 2.0. If a copy of the MPL was not distributed with this
 ## file, You can obtain one at https://mozilla.org/MPL/2.0/.
 ##
-## Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
+## Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
 
 defmodule WaitCommandTest do
   use ExUnit.Case, async: false
@@ -53,7 +53,7 @@ defmodule WaitCommandTest do
   end
 
   test "run: times out if unable to communicate with the node", context do
-    pid = String.to_integer(System.get_pid())
+    pid = String.to_integer(System.pid())
 
     {:error, {:timeout, _}} =
       @command.run([], Map.merge(context[:opts], %{pid: pid, node: :nonode@nohost}))

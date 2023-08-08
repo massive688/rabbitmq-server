@@ -608,18 +608,18 @@ tick_test(C) ->
     {S3, {_, _}} = deq(C, 4, Cid2, unsettled, Msg2, S2),
     {S4, _, _} = apply(meta(C, 5), rabbit_fifo:make_return(Cid, [MsgId]), S3),
 
-    [{mod_call, rabbit_quorum_queue, handle_tick,
-      [#resource{},
-            #{config := #{name := ?FUNCTION_NAME},
-              num_consumers := 1,
-              num_checked_out := 1,
-              num_ready_messages := 1,
-              num_messages := 2,
-              enqueue_message_bytes := 3,
-              checkout_message_bytes := 3,
-              num_discarded := _Discards},
-       [_Node]
-      ]}] = rabbit_fifo:tick(1, S4),
+    [{aux, {handle_tick,
+            [#resource{},
+             #{config := #{name := ?FUNCTION_NAME},
+               num_consumers := 1,
+               num_checked_out := 1,
+               num_ready_messages := 1,
+               num_messages := 2,
+               enqueue_message_bytes := 3,
+               checkout_message_bytes := 3,
+               num_discarded := _Discards},
+             [_Node]
+            ]}}] = rabbit_fifo:tick(1, S4),
     ok.
 
 
@@ -655,11 +655,10 @@ state_enter_file_handle_leader_reservation_test(_) ->
 
     Resource = {resource, <<"/">>, queue, <<"test">>},
     Effects = rabbit_fifo:state_enter(leader, S0),
-    ?assertMatch([
-        {mod_call, m, f, [a, the_name]},
-        _Timer,
-        {mod_call, rabbit_quorum_queue, file_handle_leader_reservation, [Resource]}
-      ], Effects),
+    ?assertMatch([{mod_call, m, f, [a, the_name]},
+                  _Timer,
+                  {mod_call, rabbit_quorum_queue, file_handle_leader_reservation, [Resource]}
+                  | _], Effects),
     ok.
 
 state_enter_file_handle_other_reservation_test(_) ->
@@ -1161,20 +1160,22 @@ single_active_consumer_state_enter_leader_include_waiting_consumers_test(C) ->
     Meta = meta(C, 1),
     % adding some consumers
     AddConsumer = fun({CTag, ChannelId}, State) ->
-        {NewState, _, _} = apply(
-            Meta,
-            make_checkout({CTag, ChannelId},
-                          {once, 1, simple_prefetch}, #{}),
-            State),
-        NewState
+                          {NewState, _, _} = apply(
+                                               Meta,
+                                               make_checkout({CTag, ChannelId},
+                                                             {once, 1, simple_prefetch}, #{}),
+                                               State),
+                          NewState
                   end,
-    State1 = lists:foldl(AddConsumer, State0,
-        [{<<"ctag1">>, Pid1}, {<<"ctag2">>, Pid2}, {<<"ctag3">>, Pid2}, {<<"ctag4">>, Pid3}]),
+    State1 = lists:foldl(AddConsumer, State0, [{<<"ctag1">>, Pid1},
+                                               {<<"ctag2">>, Pid2},
+                                               {<<"ctag3">>, Pid2},
+                                               {<<"ctag4">>, Pid3}]),
 
     Effects = rabbit_fifo:state_enter(leader, State1),
     %% 2 effects for each consumer process (channel process), 1 effect for the node,
     %% 1 effect for file handle reservation
-    ?assertEqual(2 * 3 + 1 + 1 + 1, length(Effects)).
+    ?assertEqual(2 * 3 + 1 + 1 + 1 + 1, length(Effects)).
 
 single_active_consumer_state_enter_eol_include_waiting_consumers_test(C) ->
     Resource = rabbit_misc:r("/", queue, atom_to_binary(?FUNCTION_NAME, utf8)),
@@ -1562,10 +1563,10 @@ purge_nodes_test(C) ->
                            {down, EnqPid, noconnection},
                            State3),
     ?assertMatch(
-       [{mod_call, rabbit_quorum_queue, handle_tick,
+       [{aux, {handle_tick,
          [#resource{}, _Metrics,
           [ThisNode, Node]
-         ]}] , rabbit_fifo:tick(1, State4)),
+         ]}}] , rabbit_fifo:tick(1, State4)),
     %% assert there are both enqueuers and consumers
     {State, _, _} = apply(meta(C, 5),
                           rabbit_fifo:make_purge_nodes([Node]),
@@ -1578,10 +1579,10 @@ purge_nodes_test(C) ->
     ?assertMatch(#rabbit_fifo{consumers = Cons} when map_size(Cons) == 0,
                                                      State),
     ?assertMatch(
-       [{mod_call, rabbit_quorum_queue, handle_tick,
+       [{aux, {handle_tick,
          [#resource{}, _Metrics,
           [ThisNode]
-         ]}] , rabbit_fifo:tick(1, State)),
+         ]}}] , rabbit_fifo:tick(1, State)),
     ok.
 
 meta(Config, Idx) ->
@@ -1765,21 +1766,21 @@ queue_ttl_test(C) ->
              expires => 1000},
     S0 = rabbit_fifo:init(Conf),
     Now = 1500,
-    [{mod_call, _, handle_tick, _}] = rabbit_fifo:tick(Now, S0),
+    [{aux, {handle_tick, [_, _, _]}}] = rabbit_fifo:tick(Now, S0),
     %% this should delete the queue
     [{mod_call, rabbit_quorum_queue, spawn_deleter, [QName]}]
         = rabbit_fifo:tick(Now + 1000, S0),
     %% adding a consumer should not ever trigger deletion
     Cid = {<<"cid1">>, self()},
     {S1, _} = check_auto(C, Cid, 1, S0),
-    [{mod_call, _, handle_tick, _}] = rabbit_fifo:tick(Now, S1),
-    [{mod_call, _, handle_tick, _}] = rabbit_fifo:tick(Now + 1000, S1),
+    [{aux, {handle_tick, [_, _, _]}}] = rabbit_fifo:tick(Now, S1),
+    [{aux, {handle_tick, [_, _, _]}}] = rabbit_fifo:tick(Now + 1000, S1),
     %% cancelling the consumer should then
     {S2, _, _} = apply(meta(C, 2, Now),
                        rabbit_fifo:make_checkout(Cid, cancel, #{}), S1),
     %% last_active should have been reset when consumer was cancelled
     %% last_active = 2500
-    [{mod_call, _, handle_tick, _}] = rabbit_fifo:tick(Now + 1000, S2),
+    [{aux, {handle_tick, [_, _, _]}}] = rabbit_fifo:tick(Now + 1000, S2),
     %% but now it should be deleted
     [{mod_call, rabbit_quorum_queue, spawn_deleter, [QName]}]
         = rabbit_fifo:tick(Now + 2500, S2),
@@ -1789,7 +1790,7 @@ queue_ttl_test(C) ->
                         {down, self(), noconnection}, S1),
     %% last_active should have been reset when consumer was cancelled
     %% last_active = 2500
-    [{mod_call, _, handle_tick, _}] = rabbit_fifo:tick(Now + 1000, S2D),
+    [{aux, {handle_tick, [_, _, _]}}] = rabbit_fifo:tick(Now + 1000, S2D),
     %% but now it should be deleted
     [{mod_call, rabbit_quorum_queue, spawn_deleter, [QName]}]
         = rabbit_fifo:tick(Now + 2500, S2D),
@@ -1800,7 +1801,7 @@ queue_ttl_test(C) ->
               rabbit_fifo:make_checkout(Cid, {dequeue, unsettled}, #{}),
               S0),
 
-    [{mod_call, _, handle_tick, _}] = rabbit_fifo:tick(Now + 1000, S1Deq),
+    [{aux, {handle_tick, [_, _, _]}}] = rabbit_fifo:tick(Now + 1000, S1Deq),
     %% but now it should be deleted
     [{mod_call, rabbit_quorum_queue, spawn_deleter, [QName]}]
         = rabbit_fifo:tick(Now + 2500, S1Deq),
@@ -1818,11 +1819,10 @@ queue_ttl_test(C) ->
       {wrap_reply, {dequeue, {MsgId, _}, _}}}] = Fun2([Msg]),
     {E3, _, _} = apply(meta(C, 3, Now + 1000),
                        rabbit_fifo:make_settle(Deq, [MsgId]), E2),
-    [{mod_call, _, handle_tick, _}] = rabbit_fifo:tick(Now + 1500, E3),
+    [{aux, {handle_tick, [_, _, _]}}] = rabbit_fifo:tick(Now + 1500, E3),
     %% but now it should be deleted
     [{mod_call, rabbit_quorum_queue, spawn_deleter, [QName]}]
         = rabbit_fifo:tick(Now + 3000, E3),
-
     ok.
 
 queue_ttl_with_single_active_consumer_test(C) ->
@@ -1834,35 +1834,33 @@ queue_ttl_with_single_active_consumer_test(C) ->
              single_active_consumer_on => true},
     S0 = rabbit_fifo:init(Conf),
     Now = 1500,
-    [{mod_call, _, handle_tick, _}] = rabbit_fifo:tick(Now, S0),
+    [{aux, {handle_tick, [_, _, _]}}] = rabbit_fifo:tick(Now, S0),
     %% this should delete the queue
     [{mod_call, rabbit_quorum_queue, spawn_deleter, [QName]}]
         = rabbit_fifo:tick(Now + 1000, S0),
     %% adding a consumer should not ever trigger deletion
     Cid = {<<"cid1">>, self()},
     {S1, _} = check_auto(C, Cid, 1, S0),
-    [{mod_call, _, handle_tick, _}] = rabbit_fifo:tick(Now, S1),
-    [{mod_call, _, handle_tick, _}] = rabbit_fifo:tick(Now + 1000, S1),
+    [{aux, {handle_tick, [_, _, _]}}] = rabbit_fifo:tick(Now, S1),
+    [{aux, {handle_tick, [_, _, _]}}] = rabbit_fifo:tick(Now + 1000, S1),
     %% cancelling the consumer should then
     {S2, _, _} = apply(meta(C, 2, Now),
                        rabbit_fifo:make_checkout(Cid, cancel, #{}), S1),
     %% last_active should have been reset when consumer was cancelled
     %% last_active = 2500
-    [{mod_call, _, handle_tick, _}] = rabbit_fifo:tick(Now + 1000, S2),
+    [{aux, {handle_tick, [_, _, _]}}] = rabbit_fifo:tick(Now + 1000, S2),
     %% but now it should be deleted
     [{mod_call, rabbit_quorum_queue, spawn_deleter, [QName]}]
         = rabbit_fifo:tick(Now + 2500, S2),
-
     %% Same for downs
     {S2D, _, _} = apply(meta(C, 2, Now),
                         {down, self(), noconnection}, S1),
     %% last_active should have been reset when consumer was cancelled
     %% last_active = 2500
-    [{mod_call, _, handle_tick, _}] = rabbit_fifo:tick(Now + 1000, S2D),
+    [{aux, {handle_tick, [_, _, _]}}] = rabbit_fifo:tick(Now + 1000, S2D),
     %% but now it should be deleted
     [{mod_call, rabbit_quorum_queue, spawn_deleter, [QName]}]
         = rabbit_fifo:tick(Now + 2500, S2D),
-
     ok.
 
 query_peek_test(C) ->

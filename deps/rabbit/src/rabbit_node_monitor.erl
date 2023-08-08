@@ -413,7 +413,7 @@ handle_call(_Request, _From, State) ->
     {noreply, State}.
 
 handle_cast(notify_node_up, State = #state{guid = GUID}) ->
-    Nodes = rabbit_nodes:list_running() -- [node()],
+    Nodes = rabbit_nodes:list_reachable() -- [node()],
     gen_server:abcast(Nodes, ?SERVER,
                       {node_up, node(), rabbit_db_cluster:node_type(), GUID}),
     %% register other active rabbits with this rabbit
@@ -815,6 +815,7 @@ handle_dead_rabbit(Node, State = #state{partitions = Partitions,
     ok = rabbit_amqqueue:on_node_down(Node),
     ok = rabbit_alarm:on_node_down(Node),
     ok = rabbit_mnesia:on_node_down(Node),
+    ok = rabbit_quorum_queue_periodic_membership_reconciliation:on_node_down(Node),
     %% If we have been partitioned, and we are now in the only remaining
     %% partition, we no longer care about partitions - forget them. Note
     %% that we do not attempt to deal with individual (other) partitions
@@ -843,7 +844,8 @@ ensure_keepalive_timer(State) ->
 handle_live_rabbit(Node) ->
     ok = rabbit_amqqueue:on_node_up(Node),
     ok = rabbit_alarm:on_node_up(Node),
-    ok = rabbit_mnesia:on_node_up(Node).
+    ok = rabbit_mnesia:on_node_up(Node),
+    ok = rabbit_quorum_queue_periodic_membership_reconciliation:on_node_up(Node).
 
 maybe_autoheal(State = #state{partitions = []}) ->
     State;

@@ -37,22 +37,26 @@
 -on_load(on_load/0).
 -endif.
 
-%% Initially, is_registry_initialized/0 always returns false and this `Call'
-%% is always called. The case statement is here to convince Dialyzer that the
-%% function could return values of type `__ReturnedIfUninitialized' or
+%% In this registry stub, most functions want to return `init_required' to let
+%% {@link rabbit_ff_registry_wrapper} do the first time initialization.
+%%
+%% The inner case statement is here to convince Dialyzer that the function
+%% could return values of type `__ReturnedIfUninitialized' or
 %% `__NeverReturned'.
 %%
 %% If the function was only calling itself (`Call'), Dialyzer would consider
-%% that it would never return.
+%% that it would never return. With the outer case, Dialyzer would conclude
+%% that `__ReturnedIfUninitialized' is always returned and other values will
+%% never be returned and there is no point in expecting them.
 %%
-%% With just `is_registry_initialized()' case, Dialyzer would conclude that
-%% `__ReturnedIfUninitialized' is always returned and other values will never
-%% be returned and there is no point in expecting them.
+%% In the end, `Call' is never executed because {@link
+%% rabbit_ff_registry_wrapper} is responsible for calling the registry
+%% function again after initialization.
 %%
 %% With both cases in place, it seems that we can convince Dialyzer that the
 %% function returns values matching its spec.
 -define(convince_dialyzer(__Call, __ReturnedIfUninitialized, __NeverReturned),
-        case is_registry_initialized() of
+        case always_return_true() of
             false ->
                 __Call;
             true ->
@@ -62,8 +66,12 @@
                 end
         end).
 
--spec get(rabbit_feature_flags:feature_name()) ->
-    rabbit_feature_flags:feature_props_extended() | undefined.
+-spec get(FeatureName) -> Ret when
+      FeatureName :: rabbit_feature_flags:feature_name(),
+      Ret :: FeatureProps | init_required,
+      FeatureProps :: rabbit_feature_flags:feature_props_extended() |
+                      rabbit_deprecated_features:feature_props_extended() |
+                      undefined.
 %% @doc
 %% Returns the properties of a feature flag.
 %%
@@ -74,13 +82,28 @@
 %% @returns the properties of the specified feature flag.
 
 get(FeatureName) ->
-    _ = rabbit_ff_registry_factory:initialize_registry(),
     ?convince_dialyzer(
        ?MODULE:get(FeatureName),
-       undefined,
-       #{provided_by => rabbit}).
+       init_required,
+       lists:nth(
+         rand:uniform(2),
+         [#{name => feature_flag,
+            provided_by => rabbit},
+          #{name => deprecated_feature,
+            deprecation_phase =>
+            lists:nth(
+              4,
+              [permitted_by_default,
+               denied_by_default,
+               disconnected,
+               removed]),
+            messages => #{},
+            provided_by => rabbit}])).
 
--spec list(all | enabled | disabled) -> rabbit_feature_flags:feature_flags().
+-spec list(Which) -> Ret when
+      Which :: all | enabled | disabled,
+      Ret :: FeatureFlags | init_required,
+      FeatureFlags :: rabbit_feature_flags:feature_flags().
 %% @doc
 %% Lists all, enabled or disabled feature flags, depending on the argument.
 %%
@@ -92,10 +115,11 @@ get(FeatureName) ->
 %% @returns A map of selected feature flags.
 
 list(Which) ->
-    _ = rabbit_ff_registry_factory:initialize_registry(),
-    ?convince_dialyzer(?MODULE:list(Which), #{}, #{}).
+    ?convince_dialyzer(?MODULE:list(Which), init_required, #{}).
 
--spec states() -> rabbit_feature_flags:feature_states().
+-spec states() -> Ret when
+      Ret :: FeatureStates | init_required,
+      FeatureStates :: rabbit_feature_flags:feature_states().
 %% @doc
 %% Returns the states of supported feature flags.
 %%
@@ -105,10 +129,12 @@ list(Which) ->
 %% @returns A map of feature flag states.
 
 states() ->
-    _ = rabbit_ff_registry_factory:initialize_registry(),
-    ?convince_dialyzer(?MODULE:states(), #{}, #{}).
+    ?convince_dialyzer(?MODULE:states(), init_required, #{}).
 
--spec is_supported(rabbit_feature_flags:feature_name()) -> boolean().
+-spec is_supported(FeatureName) -> Ret when
+      FeatureName :: rabbit_feature_flags:feature_name(),
+      Ret :: Supported | init_required,
+      Supported :: boolean().
 %% @doc
 %% Returns if a feature flag is supported.
 %%
@@ -120,10 +146,12 @@ states() ->
 %%   otherwise.
 
 is_supported(FeatureName) ->
-    _ = rabbit_ff_registry_factory:initialize_registry(),
-    ?convince_dialyzer(?MODULE:is_supported(FeatureName), false, true).
+    ?convince_dialyzer(?MODULE:is_supported(FeatureName), init_required, true).
 
--spec is_enabled(rabbit_feature_flags:feature_name()) -> boolean() | state_changing.
+-spec is_enabled(FeatureName) -> Ret when
+      FeatureName :: rabbit_feature_flags:feature_name(),
+      Ret :: Enabled | init_required,
+      Enabled :: boolean() | state_changing.
 %% @doc
 %% Returns if a feature flag is enabled or if its state is changing.
 %%
@@ -135,10 +163,10 @@ is_supported(FeatureName) ->
 %%   its state is transient, or `false' otherwise.
 
 is_enabled(FeatureName) ->
-    _ = rabbit_ff_registry_factory:initialize_registry(),
-    ?convince_dialyzer(?MODULE:is_enabled(FeatureName), false, true).
+    ?convince_dialyzer(?MODULE:is_enabled(FeatureName), init_required, true).
 
--spec is_registry_initialized() -> boolean().
+-spec is_registry_initialized() -> IsInitialized when
+      IsInitialized :: boolean().
 %% @doc
 %% Indicates if the registry is initialized.
 %%
@@ -152,7 +180,8 @@ is_enabled(FeatureName) ->
 is_registry_initialized() ->
     always_return_false().
 
--spec is_registry_written_to_disk() -> boolean().
+-spec is_registry_written_to_disk() -> WrittenToDisk when
+      WrittenToDisk :: boolean().
 %% @doc
 %% Indicates if the feature flags state was successfully persisted to disk.
 %%
@@ -169,14 +198,15 @@ is_registry_initialized() ->
 is_registry_written_to_disk() ->
     always_return_true().
 
--spec inventory() -> rabbit_feature_flags:inventory().
+-spec inventory() -> Ret when
+      Ret :: Inventory | init_required,
+      Inventory :: rabbit_feature_flags:inventory().
 
 inventory() ->
-    _ = rabbit_ff_registry_factory:initialize_registry(),
     Inventory = #{applications => [],
                   feature_flags => #{},
                   states => #{}},
-    ?convince_dialyzer(?MODULE:inventory(), Inventory, Inventory).
+    ?convince_dialyzer(?MODULE:inventory(), init_required, Inventory).
 
 always_return_true() ->
     %% This function is here to trick Dialyzer. We want some functions

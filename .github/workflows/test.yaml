@@ -3,6 +3,7 @@ on:
   push:
     branches:
       - main
+      - v3.12.x
       - v3.11.x
       - v3.10.x
       - v3.9.x
@@ -34,8 +35,8 @@ jobs:
       fail-fast: false
       matrix:
         otp_version_id:
-        - 25_0
         - 25_3
+        - 26
     timeout-minutes: 120
     steps:
     - name: CHECKOUT REPOSITORY
@@ -44,7 +45,9 @@ jobs:
       uses: actions/cache@v3.3.1
       with:
         path: "/home/runner/repo-cache/"
-        key: repo-cache
+        key: ${{ runner.os }}-repo-cache-${{ hashFiles('MODULE.bazel','WORKSPACE','bazel/bzlmod/secondary_umbrella.bzl') }}
+        restore-keys: |
+          ${{ runner.os }}-repo-cache-
     - name: CONFIGURE BAZEL
       run: |
         if [ -n "${{ secrets.BUILDBUDDY_API_KEY }}" ]; then
@@ -79,16 +82,16 @@ jobs:
       fail-fast: false
       matrix:
         include:
-        - erlang_version: "25.0"
-          elixir_version: 1.14.0
         - erlang_version: "25.3"
-          elixir_version: 1.14.0
+          elixir_version: 1.14.5
+        - erlang_version: "26.0"
+          elixir_version: 1.14.5
     timeout-minutes: 60
     steps:
     - name: CHECKOUT REPOSITORY
       uses: actions/checkout@v3
     - name: CONFIGURE OTP & ELIXIR
-      uses: erlef/setup-beam@v1.15
+      uses: erlef/setup-beam@v1.16
       with:
         otp-version: ${{ matrix.erlang_version }}
         elixir-version: ${{ matrix.elixir_version }}
@@ -96,7 +99,9 @@ jobs:
       uses: actions/cache@v3.3.1
       with:
         path: "/home/runner/repo-cache/"
-        key: repo-cache
+        key: ${{ runner.os }}-repo-cache-${{ hashFiles('MODULE.bazel','WORKSPACE','bazel/bzlmod/secondary_umbrella.bzl') }}
+        restore-keys: |
+          ${{ runner.os }}-repo-cache-
     - name: CONFIGURE BAZEL
       run: |
         ERLANG_HOME="$(dirname $(dirname $(which erl)))"

@@ -460,6 +460,8 @@ fun(Conf) ->
         (internal) -> rabbit_auth_backend_internal;
         (ldap)     -> rabbit_auth_backend_ldap;
         (http)     -> rabbit_auth_backend_http;
+        (oauth)    -> rabbit_auth_backend_oauth2;
+        (oauth2)   -> rabbit_auth_backend_oauth2;
         (cache)    -> rabbit_auth_backend_cache;
         (amqp)     -> rabbit_auth_backend_amqp;
         (dummy)    -> rabbit_auth_backend_dummy;
@@ -776,12 +778,23 @@ end}.
     {datatype, [integer, {list, string}]}
 ]}.
 
+{mapping, "default_policies.operator.$id.classic_queues.ha_sync_mode", "rabbit.default_policies.operator", [
+    {datatype, string}
+]}.
+
 {translation, "rabbit.default_policies.operator", fun(Conf) ->
     Props = rabbit_cuttlefish:aggregate_props(
                 Conf,
                 ["default_policies", "operator"],
                 fun({["default_policies","operator",ID,"classic_queues"|T], V}) ->
-                    {["default_policies","operator",ID|T],V};
+                    NewV = case T of
+                              ["ha_sync_mode"] ->
+                                  list_to_binary(V);
+                              ["ha_mode"] ->
+                                  list_to_binary(V);
+                              _ -> V
+                          end,
+                    {["default_policies","operator",ID|T], NewV};
                    (E) -> E
                 end),
     case Props of
@@ -883,6 +896,33 @@ end}.
  end
 }.
 
+{mapping, "ranch_connection_max", "rabbit.ranch_connection_max",
+  [{datatype, [{atom, infinity}, integer]}]}.
+
+{translation, "rabbit.ranch_connection_max",
+ fun(Conf) ->
+  case cuttlefish:conf_get("ranch_connection_max", Conf, undefined) of
+      undefined -> cuttlefish:unset();
+      infinity  -> infinity;
+      Val when is_integer(Val) -> Val;
+      _         -> cuttlefish:invalid("should be a non-negative integer")
+  end
+ end
+}.
+
+{mapping, "vhost_max", "rabbit.vhost_max",
+  [{datatype, [{atom, infinity}, integer]}, {validators, ["non_negative_integer"]}]}.
+
+{translation, "rabbit.vhost_max",
+ fun(Conf) ->
+  case cuttlefish:conf_get("vhost_max", Conf, undefined) of
+      undefined -> cuttlefish:unset();
+      infinity  -> infinity;
+      Val when is_integer(Val) -> Val;
+      _         -> cuttlefish:invalid("should be a non-negative integer")
+  end
+ end
+}.
 
 {mapping, "max_message_size", "rabbit.max_message_size",
     [{datatype, integer}, {validators, ["max_message_size"]}]}.
@@ -2088,6 +2128,31 @@ end}.
     {datatype, integer}
 ]}.
 
+%%
+%% Feature flags and deprecated features
+%% =====================================
+%%
+
+{mapping,
+ "deprecated_features.permit.$name", "rabbit.permit_deprecated_features",
+ [{datatype, {enum, [true, false]}}]
+}.
+
+%% This converts:
+%%     deprecated_features.permit.my_feature = true
+%% to:
+%%     {rabbit, [{permit_deprecated_features, #{my_feature => true}}]}.
+
+{translation, "rabbit.permit_deprecated_features",
+ fun(Conf) ->
+         Settings = cuttlefish_variable:filter_by_prefix(
+                      "deprecated_features.permit", Conf),
+         maps:from_list(
+           [{list_to_atom(FeatureName), State}
+            || {["deprecated_features", "permit", FeatureName], State}
+               <- Settings])
+ end}.
+
 % ==========================
 % Kernel section
 % ==========================
@@ -2408,7 +2473,7 @@ end}.
 
 {translation, "rabbit.classic_queue_default_version",
     fun(Conf) ->
-        case cuttlefish:conf_get("classic_queue.default_version", Conf, 1) of
+        case cuttlefish:conf_get("classic_queue.default_version", Conf, 2) of
             1 -> 1;
             2 -> 2;
             _ -> cuttlefish:unset()
@@ -2418,6 +2483,77 @@ end}.
 
 {mapping, "quorum_queue.compute_checksums", "rabbit.quorum_compute_checksums", [
     {datatype, {enum, [true, false]}}]}.
+
+{mapping, "quorum_queue.property_equivalence.relaxed_checks_on_redeclaration", "rabbit.quorum_relaxed_checks_on_redeclaration", [
+    {datatype, {enum, [true, false]}}]}.
+
+
+%%
+%% Quorum Queue membership reconciliation
+%%
+
+{mapping, "quorum_queue.continuous_membership_reconciliation.enabled", "rabbit.quorum_membership_reconciliation_enabled", [
+    {datatype, {enum, [true, false]}}]}.
+
+{mapping, "quorum_queue.continuous_membership_reconciliation.auto_remove", "rabbit.quorum_membership_reconciliation_auto_remove", [
+    {datatype, {enum, [true, false]}}]}.
+
+{mapping, "quorum_queue.continuous_membership_reconciliation.interval", "rabbit.quorum_membership_reconciliation_interval", [
+    {datatype, integer}, {validators, ["non_negative_integer"]}
+]}.
+
+{mapping, "quorum_queue.continuous_membership_reconciliation.trigger_interval", "rabbit.quorum_membership_reconciliation_trigger_interval", [
+    {datatype, integer}, {validators, ["non_negative_integer"]}
+]}.
+
+{mapping, "quorum_queue.continuous_membership_reconciliation.target_group_size", "rabbit.quorum_membership_reconciliation_target_group_size", [
+    {datatype, integer}, {validators, ["non_negative_integer"]}
+]}.
+
+
+%%
+%% Runtime parameters
+%%
+
+{mapping, "runtime_parameters.limits.$category", "rabbit.runtime_parameters.limits", [
+    {datatype, integer},
+    {validators, ["non_negative_integer"]}
+]}.
+
+{translation, "rabbit.runtime_parameters.limits",
+    fun(Conf) ->
+        case cuttlefish_variable:filter_by_prefix("runtime_parameters.limits", Conf) of
+            [] -> cuttlefish:unset();
+            Ss -> [ {list_to_binary(Category), Limit} || {[_, _, Category], Limit} <- Ss ]
+        end
+    end
+}.
+
+%%
+%% Message interceptors
+%%
+{mapping, "message_interceptors.incoming.$interceptor.overwrite", "rabbit.incoming_message_interceptors", [
+    {datatype, {enum, [true, false]}}]}.
+
+{translation, "rabbit.incoming_message_interceptors",
+    fun(Conf) ->
+         case cuttlefish_variable:filter_by_prefix("message_interceptors", Conf) of
+             [] ->
+                 cuttlefish:unset();
+             L ->
+                 [begin
+                      Interceptor = list_to_atom(Interceptor0),
+                      case lists:member(Interceptor, [set_header_timestamp,
+                                                      set_header_routing_node]) of
+                          true ->
+                              {Interceptor, Overwrite};
+                          false ->
+                              cuttlefish:invalid(io_lib:format("~p is invalid", [Interceptor]))
+                      end
+                  end || {["message_interceptors", "incoming", Interceptor0, "overwrite"], Overwrite} <- L]
+         end
+    end
+}.
 
 % ===============================
 % Validators

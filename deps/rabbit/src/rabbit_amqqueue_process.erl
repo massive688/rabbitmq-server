@@ -169,26 +169,23 @@ init_it(Recover, From, State = #q{q = Q})
   when ?amqqueue_exclusive_owner_is(Q, none) ->
     init_it2(Recover, From, State);
 
-%% You used to be able to declare an exclusive durable queue. Sadly we
-%% need to still tidy up after that case, there could be the remnants
-%% of one left over from an upgrade. So that's why we don't enforce
-%% Recover = new here.
 init_it(Recover, From, State = #q{q = Q0}) ->
     Owner = amqqueue:get_exclusive_owner(Q0),
     case rabbit_misc:is_process_alive(Owner) of
         true  -> erlang:monitor(process, Owner),
                  init_it2(Recover, From, State);
-        false -> #q{backing_queue       = undefined,
+        false -> %% Tidy up exclusive durable queue.
+                 #q{backing_queue       = undefined,
                     backing_queue_state = undefined,
                     q                   = Q} = State,
-                 send_reply(From, {owner_died, Q}),
                  BQ = backing_queue_module(Q),
                  {_, Terms} = recovery_status(Recover),
                  BQS = bq_init(BQ, Q, Terms),
                  %% Rely on terminate to delete the queue.
                  log_delete_exclusive(Owner, State),
                  {stop, {shutdown, missing_owner},
-                  State#q{backing_queue = BQ, backing_queue_state = BQS}}
+                  {{reply_to, From},
+                   State#q{backing_queue = BQ, backing_queue_state = BQS}}}
     end.
 
 init_it2(Recover, From, State = #q{q                   = Q,
@@ -286,9 +283,11 @@ terminate(shutdown = R,      State = #q{backing_queue = BQ, q = Q0}) ->
         _ = update_state(stopped, Q0),
         BQ:terminate(R, BQS)
     end, State);
-terminate({shutdown, missing_owner} = Reason, State) ->
+terminate({shutdown, missing_owner = Reason}, {{reply_to, From}, #q{q = Q} = State}) ->
     %% if the owner was missing then there will be no queue, so don't emit stats
-    terminate_shutdown(terminate_delete(false, Reason, State), State);
+    State1 = terminate_shutdown(terminate_delete(false, Reason, State), State),
+    send_reply(From, {owner_died, Q}),
+    State1;
 terminate({shutdown, _} = R, State = #q{backing_queue = BQ}) ->
     rabbit_core_metrics:queue_deleted(qname(State)),
     terminate_shutdown(fun (BQS) -> BQ:terminate(R, BQS) end, State);
@@ -318,6 +317,7 @@ terminate_delete(EmitStats, Reason0,
     fun (BQS) ->
         Reason = case Reason0 of
                      auto_delete -> normal;
+                     missing_owner -> normal;
                      Any -> Any
                  end,
         BQS1 = BQ:delete_and_terminate(Reason, BQS),
@@ -470,12 +470,12 @@ init_queue_mode(Mode, State = #q {backing_queue = BQ,
 
 init_queue_version(Version0, State = #q {backing_queue = BQ,
                                          backing_queue_state = BQS}) ->
-    %% When the version is undefined we use the default version 1.
+    %% When the version is undefined we use the default version 2.
     %% We want to BQ:set_queue_version in all cases because a v2
     %% policy might have been deleted, for example, and we want
     %% the queue to go back to v1.
     Version = case Version0 of
-        undefined -> rabbit_misc:get_env(rabbit, classic_queue_default_version, 1);
+        undefined -> rabbit_misc:get_env(rabbit, classic_queue_default_version, 2);
         _ -> Version0
     end,
     BQS1 = BQ:set_queue_version(Version, BQS),
@@ -543,7 +543,7 @@ ensure_ttl_timer(undefined, State) ->
     State;
 ensure_ttl_timer(Expiry, State = #q{ttl_timer_ref       = undefined,
                                     args_policy_version = Version}) ->
-    After = (case Expiry - os:system_time(micro_seconds) of
+    After = (case Expiry - os:system_time(microsecond) of
                  V when V > 0 -> V + 999; %% always fire later
                  _            -> 0
              end) div 1000,
@@ -855,6 +855,9 @@ requeue_and_run(AckTags, State = #q{backing_queue       = BQ,
 
 fetch(AckRequired, State = #q{backing_queue       = BQ,
                               backing_queue_state = BQS}) ->
+    %% @todo We should first drop expired messages then fetch
+    %%       the message, not the other way around. Otherwise
+    %%       we will send expired messages at times.
     {Result, BQS1} = BQ:fetch(AckRequired, BQS),
     State1 = drop_expired_msgs(State#q{backing_queue_state = BQS1}),
     {Result, maybe_send_drained(Result =:= empty, State1)}.
@@ -988,7 +991,7 @@ calculate_msg_expiry(#basic_message{content = Content}, TTL) ->
     {ok, MsgTTL} = rabbit_basic:parse_expiration(Props),
     case lists:min([TTL, MsgTTL]) of
         undefined -> undefined;
-        T         -> os:system_time(micro_seconds) + T * 1000
+        T         -> os:system_time(microsecond) + T * 1000
     end.
 
 %% Logically this function should invoke maybe_send_drained/2.
@@ -999,7 +1002,7 @@ calculate_msg_expiry(#basic_message{content = Content}, TTL) ->
 drop_expired_msgs(State) ->
     case is_empty(State) of
         true  -> State;
-        false -> drop_expired_msgs(os:system_time(micro_seconds),
+        false -> drop_expired_msgs(os:system_time(microsecond),
                                    State)
     end.
 
@@ -1779,7 +1782,7 @@ handle_pre_hibernate(State = #q{backing_queue = BQ,
       State, #q.stats_timer,
       fun () -> emit_stats(State,
                            [{idle_since,
-                             os:system_time(milli_seconds)}])
+                             os:system_time(millisecond)}])
                 end),
     State1 = rabbit_event:stop_stats_timer(State#q{backing_queue_state = BQS3},
                                            #q.stats_timer),

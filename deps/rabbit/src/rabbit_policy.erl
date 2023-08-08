@@ -33,7 +33,6 @@
 -import(rabbit_misc, [pget/2, pget/3]).
 
 -export([register/0]).
--export([invalidate/0, recover/0]).
 -export([name/1, name_op/1, effective_definition/1, merge_operator_definitions/2, get/2, get_arg/3, set/1]).
 -export([validate/5, notify/5, notify_clear/4]).
 -export([parse_set/7, set/7, delete/3, lookup/2, list/0, list/1,
@@ -41,7 +40,7 @@
 -export([parse_set_op/7, set_op/7, delete_op/3, lookup_op/2, list_op/0, list_op/1, list_op/2,
          list_formatted_op/1, list_formatted_op/3,
          match_all/2, match_as_map/1, match_op_as_map/1, definition_keys/1,
-         list_in/1, list_in/2, list_as_maps/0, list_as_maps/1, list_op_as_maps/1
+         list_in/1, list_in/2, list_as_maps/0, list_as_maps/1, list_op_as_maps/0, list_op_as_maps/1
         ]).
 -export([sort_by_priority/1]).
 
@@ -125,6 +124,9 @@ list_as_maps() ->
 
 list_as_maps(VHost) ->
     [maps:from_list(PL) || PL <- sort_by_priority(list0(VHost, fun maps:from_list/1))].
+
+list_op_as_maps() ->
+    list_op_as_maps('_').
 
 list_op_as_maps(VHost) ->
     [maps:from_list(PL) || PL <- sort_by_priority(list0_op(VHost, fun maps:from_list/1))].
@@ -247,50 +249,6 @@ get_arg(AName,   PName, X = #exchange{arguments = Args}) ->
 
 %%----------------------------------------------------------------------------
 
-%% Gets called during upgrades - therefore must not assume anything about the
-%% state of Mnesia
-invalidate() ->
-    rabbit_file:write_file(invalid_file(), <<"">>).
-
-recover() ->
-    case rabbit_file:is_file(invalid_file()) of
-        true  -> recover0(),
-                 rabbit_file:delete(invalid_file());
-        false -> ok
-    end.
-
-%% To get here we have to have just completed an Mnesia upgrade - i.e. we are
-%% the first node starting. So we can rewrite the whole database.  Note that
-%% recovery has not yet happened; we must work with the rabbit_durable_<thing>
-%% variants.
-recover0() ->
-    Xs0 = rabbit_db_exchange:get_all_durable(),
-    Policies = list(),
-    OpPolicies = list_op(),
-    Xs = [rabbit_exchange_decorator:set(
-            X#exchange{policy = match(Name, Policies),
-                       operator_policy = match(Name, OpPolicies)})
-          || X = #exchange{name = Name} <- Xs0],
-    Qs = rabbit_amqqueue:list_durable(),
-    _ = rabbit_db_exchange:set(Xs),
-    Qs0 = [begin
-               QName = amqqueue:get_name(Q0),
-               Policy1 = match(QName, Policies),
-               Q1 = amqqueue:set_policy(Q0, Policy1),
-               OpPolicy1 = match(QName, OpPolicies),
-               Q2 = amqqueue:set_operator_policy(Q1, OpPolicy1),
-               rabbit_queue_decorator:set(Q2)
-           end || Q0 <- Qs],
-    %% This function is just used to recover policies, thus no transient entities
-    %% are considered for this process as there is none to recover on boot.
-    _ = rabbit_db_queue:set_many(Qs0),
-    ok.
-
-invalid_file() ->
-    filename:join(rabbit:data_dir(), "policies_are_invalid").
-
-%%----------------------------------------------------------------------------
-
 parse_set_op(VHost, Name, Pattern, Definition, Priority, ApplyTo, ActingUser) ->
     parse_set(<<"operator_policy">>, VHost, Name, Pattern, Definition, Priority,
               ApplyTo, ActingUser).
@@ -409,11 +367,13 @@ validate(_VHost, <<"operator_policy">>, Name, Term, _User) ->
 notify(VHost, <<"policy">>, Name, Term0, ActingUser) ->
     Term = rabbit_data_coercion:atomize_keys(Term0),
     update_matched_objects(VHost, Term, ActingUser),
+    rabbit_quorum_queue_periodic_membership_reconciliation:policy_set(),
     rabbit_event:notify(policy_set, [{name, Name}, {vhost, VHost},
                                      {user_who_performed_action, ActingUser} | Term]);
 notify(VHost, <<"operator_policy">>, Name, Term0, ActingUser) ->
     Term = rabbit_data_coercion:atomize_keys(Term0),
     update_matched_objects(VHost, Term, ActingUser),
+    rabbit_quorum_queue_periodic_membership_reconciliation:policy_set(),
     rabbit_event:notify(policy_set, [{name, Name}, {vhost, VHost},
                                      {user_who_performed_action, ActingUser} | Term]).
 

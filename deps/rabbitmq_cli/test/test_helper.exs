@@ -2,17 +2,34 @@
 ## License, v. 2.0. If a copy of the MPL was not distributed with this
 ## file, You can obtain one at https://mozilla.org/MPL/2.0/.
 ##
-## Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
+## Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
 
-four_hours = 240 * 60 * 1000
+ten_minutes = 10 * 60 * 1000
 
 ExUnit.configure(
   exclude: [disabled: true],
-  module_load_timeout: four_hours,
-  timeout: four_hours
+  module_load_timeout: ten_minutes,
+  timeout: ten_minutes
 )
 
 ExUnit.start()
+
+# Elixir 1.15 compiler optimizations seem to require that we explicitly add to the code path
+true = Code.append_path(Path.join([System.get_env("DEPS_DIR"), "rabbit_common", "ebin"]))
+true = Code.append_path(Path.join([System.get_env("DEPS_DIR"), "rabbit", "ebin"]))
+
+true = Code.append_path(Path.join(["_build", Atom.to_string(Mix.env()), "lib", "amqp", "ebin"]))
+true = Code.append_path(Path.join(["_build", Atom.to_string(Mix.env()), "lib", "json", "ebin"]))
+true = Code.append_path(Path.join(["_build", Atom.to_string(Mix.env()), "lib", "x509", "ebin"]))
+
+if function_exported?(Mix, :ensure_application!, 1) do
+  Mix.ensure_application!(:mnesia)
+  Mix.ensure_application!(:os_mon)
+  Mix.ensure_application!(:public_key)
+  Mix.ensure_application!(:runtime_tools)
+  Mix.ensure_application!(:sasl)
+  Mix.ensure_application!(:xmerl)
+end
 
 defmodule TestHelper do
   import ExUnit.Assertions
@@ -41,8 +58,19 @@ defmodule TestHelper do
     :rpc.call(get_rabbit_hostname(), :rabbit_nodes, :cluster_name, [])
   end
 
-  def add_vhost(name) do
-    :rpc.call(get_rabbit_hostname(), :rabbit_vhost, :add, [name, "acting-user"])
+  def add_vhost(name, meta \\ %{}) do
+    :rpc.call(get_rabbit_hostname(), :rabbit_vhost, :add, [name, meta, "acting-user"])
+  end
+
+  def find_vhost(name) do
+    case :rpc.call(get_rabbit_hostname(), :rabbit_vhost, :lookup, [name]) do
+      {:error, _} = err ->
+        err
+
+      vhost_rec ->
+        {:vhost, _name, limits, meta} = vhost_rec
+        Map.merge(meta, %{name: name, limits: limits})
+    end
   end
 
   def delete_vhost(name) do

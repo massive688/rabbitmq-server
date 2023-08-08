@@ -94,12 +94,10 @@ init_per_testcase(successful_discovery_with_a_subset_of_nodes_coming_online = Te
     %% not exist and not just unreachable
     Config3 = rabbit_ct_helpers:merge_app_env(Config2,
       {rabbit, [
-          {cluster_formation, [
-              {discovery_retry_limit, 10},
-              {discovery_retry_interval, 200}
-          ]},
           {cluster_nodes, {NodeNamesWithHostname, disc}},
           {cluster_formation, [
+              {discovery_retry_limit, 2},
+              {discovery_retry_interval, 100},
               {internal_lock_retries, 10}
           ]}
       ]}),
@@ -146,6 +144,9 @@ successful_discovery(Config) ->
                    {cluster_members_online(Config, 0),
                     cluster_members_online(Config, 1)},
                    ?TIMEOUT).
+
+successful_discovery_with_a_subset_of_nodes_coming_online() ->
+    [{timetrap, {minutes, 15}}].
 
 successful_discovery_with_a_subset_of_nodes_coming_online(Config) ->
   ?awaitMatch(

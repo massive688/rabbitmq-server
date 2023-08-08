@@ -10,6 +10,7 @@
 -behaviour(application).
 
 -include("rabbit_mqtt.hrl").
+-include("rabbit_mqtt_packet.hrl").
 -include_lib("stdlib/include/assert.hrl").
 
 -export([start/2, stop/1]).
@@ -70,7 +71,7 @@ emit_connection_info(Items, Ref, AggregatorPid, Pids) ->
               rabbit_mqtt_reader:info(Pid, Items)
       end, Pids).
 
--spec close_local_client_connections(string() | binary()) -> {'ok', non_neg_integer()}.
+-spec close_local_client_connections(atom()) -> {'ok', non_neg_integer()}.
 close_local_client_connections(Reason) ->
     Pids = local_connection_pids(),
     lists:foreach(fun(Pid) ->
@@ -93,7 +94,8 @@ local_connection_pids() ->
 
 init_global_counters() ->
     init_global_counters(?MQTT_PROTO_V3),
-    init_global_counters(?MQTT_PROTO_V4).
+    init_global_counters(?MQTT_PROTO_V4),
+    init_global_counters(?MQTT_PROTO_V5).
 
 init_global_counters(ProtoVer) ->
     Proto = {protocol, ProtoVer},
@@ -107,4 +109,23 @@ persist_static_configuration() ->
 
     {ok, MailboxSoftLimit} = application:get_env(?APP_NAME, mailbox_soft_limit),
     ?assert(is_integer(MailboxSoftLimit)),
-    ok = persistent_term:put(?PERSISTENT_TERM_MAILBOX_SOFT_LIMIT, MailboxSoftLimit).
+    ok = persistent_term:put(?PERSISTENT_TERM_MAILBOX_SOFT_LIMIT, MailboxSoftLimit),
+
+    {ok, TopicAliasMax} = application:get_env(?APP_NAME, topic_alias_maximum),
+    ?assert(is_integer(TopicAliasMax) andalso
+            TopicAliasMax >= 0 andalso
+            TopicAliasMax =< ?TWO_BYTE_INTEGER_MAX),
+    ok = persistent_term:put(?PERSISTENT_TERM_TOPIC_ALIAS_MAXIMUM, TopicAliasMax),
+
+    {ok, MaxSizeUnauth} = application:get_env(?APP_NAME, max_packet_size_unauthenticated),
+    assert_valid_max_packet_size(MaxSizeUnauth),
+    ok = persistent_term:put(?PERSISTENT_TERM_MAX_PACKET_SIZE_UNAUTHENTICATED, MaxSizeUnauth),
+
+    {ok, MaxSizeAuth} = application:get_env(?APP_NAME, max_packet_size_authenticated),
+    assert_valid_max_packet_size(MaxSizeAuth),
+    ok = persistent_term:put(?PERSISTENT_TERM_MAX_PACKET_SIZE_AUTHENTICATED, MaxSizeAuth).
+
+assert_valid_max_packet_size(Val) ->
+    ?assert(is_integer(Val) andalso
+            Val > 0 andalso
+            Val =< ?MAX_PACKET_SIZE).

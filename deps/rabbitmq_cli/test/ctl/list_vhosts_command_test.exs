@@ -2,7 +2,7 @@
 ## License, v. 2.0. If a copy of the MPL was not distributed with this
 ## file, You can obtain one at https://mozilla.org/MPL/2.0/.
 ##
-## Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
+## Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
 
 defmodule ListVhostsCommandTest do
   use ExUnit.Case, async: false
@@ -75,9 +75,11 @@ defmodule ListVhostsCommandTest do
              {:validation_failure, {:bad_info_key, [:quack]}}
   end
 
-  test "validate: multiple bad args return a list of bad info key values", context do
-    assert @command.validate(["quack", "oink"], context[:opts]) ==
-             {:validation_failure, {:bad_info_key, [:oink, :quack]}}
+  test "validate: returns multiple bad args return a list of bad info key values", context do
+    result = @command.validate(["quack", "oink"], context[:opts])
+    assert match?({:validation_failure, {:bad_info_key, _}}, result)
+    {_, {_, keys}} = result
+    assert :lists.sort(keys) == [:oink, :quack]
   end
 
   test "validate: return bad_info_key on mix of good and bad args", context do

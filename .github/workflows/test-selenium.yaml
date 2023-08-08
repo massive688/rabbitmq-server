@@ -3,6 +3,7 @@ on:
   push:
     branches:
       - main
+      - v3.12.x
       - v3.11.x
       - bump-otp-for-oci
       - bump-rbe-*
@@ -27,12 +28,12 @@ jobs:
       fail-fast: false
       matrix:
         erlang_version:
-        - "25.3"
+        - "26.0"
         browser:
         - chrome
         include:
-        - erlang_version: "25.3"
-          elixir_version: 1.13.4
+        - erlang_version: "26.0"
+          elixir_version: 1.14.5
     env:
       SELENIUM_DIR: deps/rabbitmq_management/selenium
       DOCKER_NETWORK: rabbitmq_net
@@ -41,7 +42,7 @@ jobs:
       uses: actions/checkout@v3
 
     - name: Configure OTP & Elixir
-      uses: erlef/setup-beam@v1.15
+      uses: erlef/setup-beam@v1.16
       with:
         otp-version: ${{ matrix.erlang_version }}
         elixir-version: ${{ matrix.elixir_version }}
@@ -50,7 +51,9 @@ jobs:
       uses: actions/cache@v3.3.1
       with:
         path: "/home/runner/repo-cache/"
-        key: repo-cache
+        key: ${{ runner.os }}-repo-cache-${{ hashFiles('MODULE.bazel','WORKSPACE','bazel/bzlmod/secondary_umbrella.bzl') }}
+        restore-keys: |
+          ${{ runner.os }}-repo-cache-
 
     - name: Configure Bazel
       run: |
@@ -101,6 +104,7 @@ jobs:
         path: |
           logs/*
           screens/*
+          /tmp/selenium/*
 
   summary-selenium:
     needs:

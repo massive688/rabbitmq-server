@@ -29,8 +29,10 @@
 -define(SPARKPLUG_MP_MQTT_TO_AMQP, sparkplug_mp_mqtt_to_amqp).
 -define(SPARKPLUG_MP_AMQP_TO_MQTT, sparkplug_mp_amqp_to_mqtt).
 
--spec queue_name_bin(binary(), qos()) ->
+-spec queue_name_bin(binary(), qos() | will) ->
     binary().
+queue_name_bin(ClientId, will) ->
+    <<"mqtt-will-", ClientId/binary>>;
 queue_name_bin(ClientId, QoS) ->
     Prefix = queue_name_prefix(ClientId),
     queue_name0(Prefix, QoS).
@@ -69,7 +71,7 @@ init_sparkplug() ->
             ok
     end.
 
--spec mqtt_to_amqp(binary()) -> binary().
+-spec mqtt_to_amqp(topic()) -> topic().
 mqtt_to_amqp(Topic) ->
     T = case persistent_term:get(?SPARKPLUG_MP_MQTT_TO_AMQP, no_sparkplug) of
             no_sparkplug ->
@@ -84,7 +86,7 @@ mqtt_to_amqp(Topic) ->
         end,
     cached(mta_cache, fun to_amqp/1, T).
 
--spec amqp_to_mqtt(binary()) -> binary().
+-spec amqp_to_mqtt(topic()) -> topic().
 amqp_to_mqtt(Topic) ->
     T = cached(atm_cache, fun to_mqtt/1, Topic),
     case persistent_term:get(?SPARKPLUG_MP_AMQP_TO_MQTT, no_sparkplug) of

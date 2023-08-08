@@ -2,10 +2,14 @@ PROJECT = rabbitmq_cli
 
 BUILD_DEPS = rabbit_common
 DEPS = csv json observer_cli stdout_formatter
-TEST_DEPS = amqp_client rabbit
+TEST_DEPS = amqp amqp_client dialyxir temp x509 rabbit
 
-dep_csv = hex 2.4.1
+dep_amqp = hex 2.1.1
+dep_csv = hex 3.0.5
+dep_dialyxir = hex 0.5.1
 dep_json = hex 1.4.1
+dep_temp = hex 0.4.7
+dep_x509 = hex 0.7.0
 
 DEP_EARLY_PLUGINS = rabbit_common/mk/rabbitmq-early-plugin.mk
 DEP_PLUGINS = rabbit_common/mk/rabbitmq-plugin.mk

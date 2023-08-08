@@ -6,8 +6,11 @@
 %%
 
 -module(rabbit_queue_type).
+
+-behaviour(rabbit_registry_class).
+
 -include("amqqueue.hrl").
--include_lib("rabbit_common/include/resource.hrl").
+-include_lib("rabbit_common/include/rabbit.hrl").
 
 -export([
          init/0,
@@ -49,11 +52,20 @@
          notify_decorators/1
          ]).
 
+-export([
+         added_to_rabbit_registry/2,
+         removed_from_rabbit_registry/1,
+         known_queue_type_names/0,
+         known_queue_type_modules/0
+        ]).
+
 -type queue_name() :: rabbit_amqqueue:name().
 -type queue_state() :: term().
 -type msg_tag() :: term().
 -type arguments() :: queue_arguments | consumer_arguments.
 -type queue_type() :: rabbit_classic_queue | rabbit_quorum_queue | rabbit_stream_queue.
+
+-export_type([queue_type/0]).
 
 -define(STATE, ?MODULE).
 
@@ -62,7 +74,8 @@
 -define(DOWN_KEYS, [name, durable, auto_delete, arguments, pid, recoverable_slaves, type, state]).
 
 %% TODO resolve all registered queue types from registry
--define(QUEUE_TYPES, [rabbit_classic_queue, rabbit_quorum_queue, rabbit_stream_queue]).
+-define(QUEUE_MODULES, [rabbit_classic_queue, rabbit_quorum_queue, rabbit_stream_queue]).
+-define(KNOWN_QUEUE_TYPES, [<<"classic">>, <<"quorum">>, <<"stream">>]).
 
 %% anything that the host process needs to do on behalf of the queue type session
 -type action() ::
@@ -223,7 +236,11 @@ discover(<<"quorum">>) ->
 discover(<<"classic">>) ->
     rabbit_classic_queue;
 discover(<<"stream">>) ->
-    rabbit_stream_queue.
+    rabbit_stream_queue;
+discover(Other) when is_binary(Other) ->
+    T = rabbit_registry:binary_to_type(Other),
+    {ok, Mod} = rabbit_registry:lookup_module(queue, T),
+    Mod.
 
 feature_flag_name(<<"quorum">>) ->
     quorum_queue;
@@ -352,7 +369,7 @@ is_server_named_allowed(Type) ->
 arguments(ArgumentType) ->
     Args0 = lists:map(fun(T) ->
                               maps:get(ArgumentType, T:capabilities(), [])
-                      end, ?QUEUE_TYPES),
+                      end, known_queue_type_modules()),
     Args = lists:flatten(Args0),
     lists:usort(Args).
 
@@ -421,7 +438,7 @@ is_recoverable(Q) ->
     {Recovered :: [amqqueue:amqqueue()],
      Failed :: [amqqueue:amqqueue()]}.
 recover(VHost, Qs) ->
-    ByType0 = maps:from_keys(?QUEUE_TYPES, []),
+    ByType0 = maps:from_keys(known_queue_type_modules(), []),
     ByType = lists:foldl(
                fun (Q, Acc) ->
                        T = amqqueue:get_type(Q),
@@ -480,7 +497,9 @@ module(QRef, State) ->
             {error, not_found}
     end.
 
--spec deliver([amqqueue:amqqueue()], Delivery :: term(),
+-spec deliver([amqqueue:amqqueue() |
+               {amqqueue:amqqueue(), rabbit_exchange:route_infos()}],
+              rabbit_types:delivery(),
               stateless | state()) ->
     {ok, state(), actions()} | {error, Reason :: term()}.
 deliver(Qs, Delivery, State) ->
@@ -491,47 +510,76 @@ deliver(Qs, Delivery, State) ->
             {error, Reason}
     end.
 
-deliver0(Qs, Delivery, stateless) ->
-    ByType = lists:foldl(fun(Q, Acc) ->
-                                 Mod = amqqueue:get_type(Q),
-                                 maps:update_with(
-                                   Mod, fun(A) ->
+deliver0(Qs, Delivery0, stateless) ->
+    ByTypeAndBindingKeys =
+    lists:foldl(fun(Elem, Acc) ->
+                        {Q, BKeys} = queue_binding_keys(Elem),
+                        Mod = amqqueue:get_type(Q),
+                        maps:update_with(
+                          {Mod, BKeys}, fun(A) ->
                                                 [{Q, stateless} | A]
                                         end, [{Q, stateless}], Acc)
-                         end, #{}, Qs),
-    maps:foreach(fun(Mod, QSs) ->
+                end, #{}, Qs),
+    maps:foreach(fun({Mod, BKeys}, QSs) ->
+                         Delivery = add_binding_keys(Delivery0, BKeys),
                          _ = Mod:deliver(QSs, Delivery)
-                 end, ByType),
+                 end, ByTypeAndBindingKeys),
     {ok, stateless, []};
-deliver0(Qs, Delivery, #?STATE{} = State0) ->
+deliver0(Qs, Delivery0, #?STATE{} = State0) ->
     %% TODO: optimise single queue case?
     %% sort by queue type - then dispatch each group
-    ByType = lists:foldl(
-               fun (Q, Acc) ->
-                       Mod = amqqueue:get_type(Q),
-                       QState = case Mod:is_stateful() of
-                                    true ->
-                                        #ctx{state = S} = get_ctx(Q, State0),
-                                        S;
-                                    false ->
-                                        stateless
-                                end,
-                       maps:update_with(
-                         Mod, fun (A) ->
+    ByTypeAndBindingKeys =
+    lists:foldl(
+      fun (Elem, Acc) ->
+              {Q, BKeys} = queue_binding_keys(Elem),
+              Mod = amqqueue:get_type(Q),
+              QState = case Mod:is_stateful() of
+                           true ->
+                               #ctx{state = S} = get_ctx(Q, State0),
+                               S;
+                           false ->
+                               stateless
+                       end,
+              maps:update_with(
+                {Mod, BKeys}, fun (A) ->
                                       [{Q, QState} | A]
                               end, [{Q, QState}], Acc)
-               end, #{}, Qs),
+      end, #{}, Qs),
     %%% dispatch each group to queue type interface?
-    {Xs, Actions} = maps:fold(fun(Mod, QSs, {X0, A0}) ->
-                                      {X, A} = Mod:deliver(QSs, Delivery),
-                                      {X0 ++ X, A0 ++ A}
-                              end, {[], []}, ByType),
+    {Xs, Actions} = maps:fold(
+                      fun({Mod, BKeys}, QSs, {X0, A0}) ->
+                              Delivery = add_binding_keys(Delivery0, BKeys),
+                              {X, A} = Mod:deliver(QSs, Delivery),
+                              {X0 ++ X, A0 ++ A}
+                      end, {[], []}, ByTypeAndBindingKeys),
     State = lists:foldl(
               fun({Q, S}, Acc) ->
                       Ctx = get_ctx_with(Q, Acc, S),
                       set_ctx(qref(Q), Ctx#ctx{state = S}, Acc)
               end, State0, Xs),
     {ok, State, Actions}.
+
+queue_binding_keys(Q)
+  when ?is_amqqueue(Q) ->
+    {Q, #{}};
+queue_binding_keys({Q, #{binding_keys := BindingKeys}})
+  when ?is_amqqueue(Q) andalso is_map(BindingKeys) ->
+    {Q, BindingKeys};
+queue_binding_keys({Q, _RouteInfos})
+  when ?is_amqqueue(Q) ->
+    {Q, #{}}.
+
+add_binding_keys(Delivery, BindingKeys)
+  when map_size(BindingKeys) =:= 0 ->
+    Delivery;
+add_binding_keys(Delivery, BindingKeys) ->
+    L = maps:fold(fun(B, true, Acc) ->
+                          [{longstr, B} | Acc]
+                  end, [], BindingKeys),
+    BasicMsg = rabbit_basic:add_header(
+                 <<"x-binding-keys">>, array, L,
+                 Delivery#delivery.message),
+    Delivery#delivery{message = BasicMsg}.
 
 -spec settle(queue_name(), settle_op(), rabbit_types:ctag(),
              [non_neg_integer()], state()) ->
@@ -585,6 +633,13 @@ dequeue(Q, NoAck, LimiterPid, CTag, Ctxs) ->
             Err
     end.
 
+
+-spec added_to_rabbit_registry(atom(), atom()) -> ok.
+added_to_rabbit_registry(_Type, _ModuleName) -> ok.
+
+-spec removed_from_rabbit_registry(atom()) -> ok.
+removed_from_rabbit_registry(_Type) -> ok.
+
 get_ctx(QOrQref, State) ->
     get_ctx_with(QOrQref, State, undefined).
 
@@ -632,3 +687,16 @@ qref(#resource{kind = queue} = QName) ->
     QName;
 qref(Q) when ?is_amqqueue(Q) ->
     amqqueue:get_name(Q).
+
+-spec known_queue_type_modules() -> [module()].
+known_queue_type_modules() ->
+    Registered = rabbit_registry:lookup_all(queue),
+    {_, Modules} = lists:unzip(Registered),
+    ?QUEUE_MODULES ++ Modules.
+
+-spec known_queue_type_names() -> [binary()].
+known_queue_type_names() ->
+    Registered = rabbit_registry:lookup_all(queue),
+    {QueueTypes, _} = lists:unzip(Registered),
+    QTypeBins = lists:map(fun(X) -> atom_to_binary(X) end, QueueTypes),
+    ?KNOWN_QUEUE_TYPES ++ QTypeBins.

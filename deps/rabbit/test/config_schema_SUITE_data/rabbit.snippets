@@ -9,6 +9,14 @@
   "auth_backends.1 = ldap",
   [{rabbit,[{auth_backends,[rabbit_auth_backend_ldap]}]}],
   []},
+ {http_auth_backend,
+  "auth_backends.1 = http",
+  [{rabbit,[{auth_backends,[rabbit_auth_backend_http]}]}],
+  []},
+ {oauth2_auth_backend,
+  "auth_backends.1 = oauth2",
+  [{rabbit,[{auth_backends,[rabbit_auth_backend_oauth2]}]}],
+  []},
  {multiple_auth_backends,
  "auth_backends.1 = ldap
 auth_backends.2 = internal",
@@ -142,11 +150,14 @@ ssl_options.fail_if_no_peer_cert = true",
   default_policies.operator.a.vhost_pattern = banana
   default_policies.operator.a.classic_queues.ha_mode = exactly
   default_policies.operator.a.classic_queues.ha_params = 2
+  default_policies.operator.a.classic_queues.ha_sync_mode = automatic
+
  ",
   [{rabbit, [{default_policies, [{operator, [
       {<<"a">>, [{<<"expires">>, 3600000},
-                 {<<"ha_mode">>, "exactly"},
+                 {<<"ha_mode">>, <<"exactly">>},
                  {<<"ha_params">>, 2},
+                 {<<"ha_sync_mode">>, <<"automatic">>},
                  {<<"queue_pattern">>, "apple"},
                  {<<"vhost_pattern">>, "banana"}]}]}]}]}],
   []},
@@ -287,13 +298,13 @@ tcp_listen_options.exit_on_close = false",
   "total_memory_available_override_value = 1024MB",
   [{rabbit,[{total_memory_available_override_value, "1024MB"}]}],
   []},
- {connection_max,
-  "connection_max = 999",
-  [{rabbit,[{connection_max, 999}]}],
+ {ranch_connection_max,
+  "ranch_connection_max = 999",
+  [{rabbit,[{ranch_connection_max, 999}]}],
   []},
- {connection_max,
-  "connection_max = infinity",
-  [{rabbit,[{connection_max, infinity}]}],
+ {ranch_connection_max,
+  "ranch_connection_max = infinity",
+  [{rabbit,[{ranch_connection_max, infinity}]}],
   []},
  {channel_max,
   "channel_max = 16",
@@ -896,5 +907,54 @@ credential_validator.regexp = ^abc\\d+",
    [{rabbit, [
       {quorum_compute_checksums, true}
      ]}],
+   []},
+
+  %%
+  %% Runtime parameters
+  %%
+
+  {runtime_parameters_limits,
+  "
+   runtime_parameters.limits.federation = 2
+   runtime_parameters.limits.shovel = 1
+  ",
+   [{rabbit, [{runtime_parameters, [{limits, [
+       {<<"shovel">>, 1},
+       {<<"federation">>, 2}
+     ]}]}]}],
+   []},
+
+  %%
+  %% Deprecated features
+  %%
+
+  {deprecated_features_cmq,
+   "deprecated_features.permit.classic_queue_mirroring = false",
+   [{rabbit, [
+      {permit_deprecated_features, #{classic_queue_mirroring => false}}
+     ]}],
+   []},
+
+  %%
+  %% Message interceptors
+  %%
+
+  {message_interceptors,
+   "message_interceptors.incoming.set_header_timestamp.overwrite = true",
+   [{rabbit, [
+      {incoming_message_interceptors, [{set_header_timestamp, true}]}
+     ]}],
+   []},
+
+  {message_interceptors,
+  "
+   message_interceptors.incoming.set_header_routing_node.overwrite = false
+   message_interceptors.incoming.set_header_timestamp.overwrite = false
+  ",
+   [{rabbit, [
+      {incoming_message_interceptors, [{set_header_routing_node, false},
+                                       {set_header_timestamp, false}]}
+     ]}],
    []}
+
 ].

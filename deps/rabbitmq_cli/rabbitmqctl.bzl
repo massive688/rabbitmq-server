@@ -1,3 +1,4 @@
+load("@bazel_skylib//lib:shell.bzl", "shell")
 load(
     "@rules_erlang//:erlang_app_info.bzl",
     "ErlangAppInfo",
@@ -37,19 +38,35 @@ def deps_dir_contents(ctx, deps, dir):
     files = []
     for dep in deps:
         lib_info = dep[ErlangAppInfo]
-        for src in lib_info.include + lib_info.beam + lib_info.srcs:
+        files_by_path = {}
+        for src in lib_info.include + lib_info.srcs:
             if not src.is_directory:
                 rp = additional_file_dest_relative_path(dep.label, src)
+                files_by_path[rp] = src
+            else:
+                fail("unexpected directory in", lib_info)
+        for rp, src in files_by_path.items():
+            f = ctx.actions.declare_file(path_join(
+                dir,
+                lib_info.app_name,
+                rp,
+            ))
+            ctx.actions.symlink(
+                output = f,
+                target_file = src,
+            )
+            files.extend([f, src])
+        for beam in lib_info.beam:
+            if not beam.is_directory:
                 f = ctx.actions.declare_file(path_join(
-                    dir,
-                    lib_info.app_name,
-                    rp,
-                ))
+                    dir, lib_info.app_name, "ebin", beam.basename))
                 ctx.actions.symlink(
                     output = f,
-                    target_file = src,
+                    target_file = beam,
                 )
-                files.append(f)
+                files.extend([f, beam])
+            else:
+                fail("unexpected directory in", lib_info)
     return files
 
 def _impl(ctx):
@@ -60,7 +77,6 @@ def _impl(ctx):
     ebin = ctx.actions.declare_directory("ebin")
     consolidated = ctx.actions.declare_directory("consolidated")
     mix_invocation_dir = ctx.actions.declare_directory("{}_mix".format(ctx.label.name))
-    fetched_srcs = ctx.actions.declare_file("deps.tar")
 
     deps = flat_deps(ctx.attr.deps)
 
@@ -100,7 +116,6 @@ fi
 ABS_EBIN_DIR=$PWD/{ebin_dir}
 ABS_CONSOLIDATED_DIR=$PWD/{consolidated_dir}
 ABS_ESCRIPT_PATH=$PWD/{escript_path}
-ABS_FETCHED_SRCS=$PWD/{fetched_srcs}
 
 export PATH="$ABS_ELIXIR_HOME"/bin:"{erlang_home}"/bin:${{PATH}}
 
@@ -113,18 +128,16 @@ cp -r {package_dir}/config ${{MIX_INVOCATION_DIR}}/config
 cp -r {package_dir}/lib ${{MIX_INVOCATION_DIR}}/lib
 cp    {package_dir}/mix.exs ${{MIX_INVOCATION_DIR}}/mix.exs
 
+ORIGINAL_DIR=$PWD
 cd ${{MIX_INVOCATION_DIR}}
 export IS_BAZEL=true
 export HOME=${{PWD}}
 export DEPS_DIR=$(dirname $ABS_EBIN_DIR)/{deps_dir}
 export MIX_ENV=prod
 export ERL_COMPILER_OPTIONS=deterministic
-"${{ABS_ELIXIR_HOME}}"/bin/mix local.hex --force
-"${{ABS_ELIXIR_HOME}}"/bin/mix local.rebar --force
-"${{ABS_ELIXIR_HOME}}"/bin/mix deps.get --only prod
-if [ ! -d _build/${{MIX_ENV}}/lib/rabbit_common ]; then
-    cp -r ${{DEPS_DIR}}/* _build/${{MIX_ENV}}/lib
-fi
+for archive in {archives}; do
+    "${{ABS_ELIXIR_HOME}}"/bin/mix archive.install --force $ORIGINAL_DIR/$archive
+done
 "${{ABS_ELIXIR_HOME}}"/bin/mix deps.compile
 "${{ABS_ELIXIR_HOME}}"/bin/mix compile
 "${{ABS_ELIXIR_HOME}}"/bin/mix escript.build
@@ -133,9 +146,6 @@ cp escript/rabbitmqctl ${{ABS_ESCRIPT_PATH}}
 
 cp _build/${{MIX_ENV}}/lib/rabbitmqctl/ebin/* ${{ABS_EBIN_DIR}}
 cp _build/${{MIX_ENV}}/lib/rabbitmqctl/consolidated/* ${{ABS_CONSOLIDATED_DIR}}
-
-tar --file ${{ABS_FETCHED_SRCS}} \\
-    --create deps
 
 # remove symlinks from the _build directory since it
 # is not used, and bazel does not allow them
@@ -150,7 +160,11 @@ find . -type l -delete
         escript_path = escript.path,
         ebin_dir = ebin.path,
         consolidated_dir = consolidated.path,
-        fetched_srcs = fetched_srcs.path,
+        archives = " ".join([shell.quote(a.path) for a in ctx.files.archives]),
+        precompiled_deps = " ".join([
+            dep[ErlangAppInfo].app_name
+            for dep in ctx.attr.deps
+        ]),
     )
 
     inputs = depset(
@@ -158,6 +172,7 @@ find . -type l -delete
         transitive = [
             erlang_runfiles.files,
             elixir_runfiles.files,
+            depset(ctx.files.archives),
             depset(deps_dir_files),
         ],
     )
@@ -169,7 +184,6 @@ find . -type l -delete
             ebin,
             consolidated,
             mix_invocation_dir,
-            fetched_srcs,
         ],
         command = script,
         mnemonic = "MIX",
@@ -186,7 +200,7 @@ find . -type l -delete
     return [
         DefaultInfo(
             executable = escript,
-            files = depset([ebin, consolidated, fetched_srcs]),
+            files = depset([ebin, consolidated]),
             runfiles = runfiles,
         ),
         ElixirAppInfo(
@@ -218,6 +232,9 @@ rabbitmqctl_private = rule(
         "deps": attr.label_list(
             providers = [ErlangAppInfo],
         ),
+        "archives": attr.label_list(
+            allow_files = [".ez"],
+        ),
         "source_deps": attr.label_keyed_string_dict(),
     },
     toolchains = [
@@ -236,6 +253,9 @@ def _elixir_app_to_erlang_app(ctx):
     ebin = ctx.actions.declare_directory(path_join(ctx.label.name, "ebin"))
 
     if ctx.attr.mode == "elixir":
+        if len(ctx.attr.deps) > 0:
+            fail("deps cannot be specified in the 'elixir' mode")
+
         ctx.actions.run_shell(
             inputs = ctx.files.elixir_as_app + ctx.files.elixir_app,
             outputs = [ebin],
@@ -262,6 +282,8 @@ done
                 include = lib_info.include,
                 beam = [ebin],
                 priv = lib_info.priv,
+                license_files = lib_info.license_files,
+                srcs = lib_info.srcs,
                 deps = lib_info.deps,
             ),
         ]
@@ -291,12 +313,14 @@ done
 
         lib_info = ctx.attr.elixir_app[ElixirAppInfo]
 
+        deps = lib_info.deps + ctx.attr.deps
+
         runfiles = ctx.runfiles([ebin]).merge_all([
             erlang_runfiles,
             elixir_runfiles,
         ] + [
             dep[DefaultInfo].default_runfiles
-            for dep in lib_info.deps
+            for dep in deps
         ])
 
         return [
@@ -312,7 +336,7 @@ done
                 priv = lib_info.priv,
                 license_files = lib_info.license_files,
                 srcs = lib_info.srcs,
-                deps = lib_info.deps,
+                deps = deps,
             ),
         ]
 
@@ -332,6 +356,9 @@ elixir_app_to_erlang_app = rule(
                 "elixir",
                 "app",
             ],
+        ),
+        "deps": attr.label_list(
+            providers = [ErlangAppInfo],
         ),
     },
     toolchains = [
@@ -381,4 +408,5 @@ def rabbitmqctl(
         elixir_app = ":" + name,
         mode = "app",
         visibility = visibility,
+        deps = [":elixir"],
     )

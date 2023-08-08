@@ -26,8 +26,8 @@
 publish(Msg, Reason, X, RK, SourceQName) ->
     DLMsg = make_msg(Msg, Reason, X#exchange.name, RK, SourceQName),
     Delivery = rabbit_basic:delivery(false, false, DLMsg, undefined),
-    {QNames, Cycles} = detect_cycles(Reason, DLMsg,
-                                     rabbit_exchange:route(X, Delivery)),
+    QNames0 = rabbit_exchange:route(X, Delivery, #{return_binding_keys => true}),
+    {QNames, Cycles} = detect_cycles(Reason, DLMsg, QNames0),
     lists:foreach(fun log_cycle_once/1, Cycles),
     Qs0 = rabbit_amqqueue:lookup_many(QNames),
     Qs = rabbit_amqqueue:prepend_extra_bcc(Qs0),
@@ -38,36 +38,44 @@ make_msg(Msg = #basic_message{content       = Content,
                               exchange_name = Exchange,
                               routing_keys  = RoutingKeys},
          Reason, DLX, RK, #resource{name = QName}) ->
-    {DeathRoutingKeys, HeadersFun1} =
-        case RK of
-            undefined -> {RoutingKeys, fun (H) -> H end};
-            _         -> {[RK], fun (H) -> lists:keydelete(<<"CC">>, 1, H) end}
-        end,
+    #content{properties = #'P_basic'{headers = Headers} = Props} = Content1 =
+        rabbit_binary_parser:ensure_content_decoded(Content),
+    Headers1 = if Headers =:= undefined -> [];
+                  is_list(Headers) -> Headers
+               end,
     ReasonBin = atom_to_binary(Reason),
-    TimeSec = os:system_time(seconds),
-    PerMsgTTL = per_msg_ttl_header(Content#content.properties),
-    HeadersFun2 =
-        fun (Headers) ->
-                %% The first routing key is the one specified in the
-                %% basic.publish; all others are CC or BCC keys.
-                RKs  = [hd(RoutingKeys) | rabbit_basic:header_routes(Headers)],
-                RKs1 = [{longstr, Key} || Key <- RKs],
-                Info = [{<<"reason">>,       longstr,   ReasonBin},
-                        {<<"queue">>,        longstr,   QName},
-                        {<<"time">>,         timestamp, TimeSec},
-                        {<<"exchange">>,     longstr,   Exchange#resource.name},
-                        {<<"routing-keys">>, array,     RKs1}] ++ PerMsgTTL,
-                HeadersFun1(update_x_death_header(Info, Headers))
+    TimeSec = os:system_time(second),
+    PerMsgTTL = per_msg_ttl_header(Props),
+    %% The first routing key is the one specified in the
+    %% basic.publish; all others are CC or BCC keys.
+    RKs  = [hd(RoutingKeys) | rabbit_basic:header_routes(Headers1)],
+    RKs1 = [{longstr, Key} || Key <- RKs],
+    Info = [{<<"reason">>,       longstr,   ReasonBin},
+            {<<"queue">>,        longstr,   QName},
+            {<<"time">>,         timestamp, TimeSec},
+            {<<"exchange">>,     longstr,   Exchange#resource.name},
+            {<<"routing-keys">>, array,     RKs1}] ++ PerMsgTTL,
+    {DeathRoutingKeys, Headers2} =
+        case RK of
+            undefined -> {RoutingKeys, Headers1};
+            _         -> {[RK], lists:keydelete(<<"CC">>, 1, Headers1)}
         end,
-    Content1 = #content{properties = Props} =
-        rabbit_basic:map_headers(HeadersFun2, Content),
-    Content2 = Content1#content{properties =
-                                    Props#'P_basic'{expiration = undefined}},
+    Headers3 = update_x_death_header(Info, Headers2),
+    {Expiration, Headers5} =
+        case lists:keytake(<<"x-dead-letter-expiration">>, 1, Headers3) of
+            false ->
+                {undefined, Headers3};
+            {value, {<<"x-dead-letter-expiration">>, longstr, Expiration0}, Headers4} ->
+                {Expiration0, Headers4}
+        end,
+    Props1 = Props#'P_basic'{headers = Headers5,
+                             expiration = Expiration},
+    Content2 = rabbit_binary_generator:clear_encoded_content(
+                 Content1#content{properties = Props1}),
     Msg#basic_message{exchange_name = DLX,
                       id            = rabbit_guid:gen(),
                       routing_keys  = DeathRoutingKeys,
                       content       = Content2}.
-
 
 x_death_event_key(Info, Key) ->
     case lists:keysearch(Key, 1, Info) of
@@ -107,8 +115,6 @@ group_by_queue_and_reason(Tables) ->
           end, {sets:new([{version, 2}]), []}, Tables),
     Grouped.
 
-update_x_death_header(Info, undefined) ->
-    update_x_death_header(Info, []);
 update_x_death_header(Info, Headers) ->
     X = x_death_event_key(Info, <<"exchange">>),
     Q = x_death_event_key(Info, <<"queue">>),
@@ -187,9 +193,8 @@ queue_and_reason_matcher(Q, R) ->
             F(Info)
     end.
 
-per_msg_ttl_header(#'P_basic'{expiration = undefined}) ->
-    [];
-per_msg_ttl_header(#'P_basic'{expiration = Expiration}) ->
+per_msg_ttl_header(#'P_basic'{expiration = Expiration})
+  when is_binary(Expiration) ->
     [{<<"original-expiration">>, longstr, Expiration}];
 per_msg_ttl_header(_) ->
     [].
@@ -209,13 +214,19 @@ detect_cycles(_Reason, #basic_message{content = Content}, Queues) ->
                 {array, Deaths} ->
                     {Cycling, NotCycling} =
                         lists:partition(fun (#resource{name = Queue}) ->
+                                                is_cycle(Queue, Deaths);
+                                            ({#resource{name = Queue}, _RouteInfos}) ->
                                                 is_cycle(Queue, Deaths)
                                         end, Queues),
                     OldQueues = [rabbit_misc:table_lookup(D, <<"queue">>) ||
                                     {table, D} <- Deaths],
                     OldQueues1 = [QName || {longstr, QName} <- OldQueues],
-                    {NotCycling, [[QName | OldQueues1] ||
-                                     #resource{name = QName} <- Cycling]};
+                    Cycling1 = lists:map(fun(#resource{name = QName}) ->
+                                                 [QName | OldQueues1];
+                                            ({#resource{name = QName}, _RouteInfos}) ->
+                                                 [QName | OldQueues1]
+                                         end, Cycling),
+                    {NotCycling, Cycling1};
                 _ ->
                     NoCycles
             end

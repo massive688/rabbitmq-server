@@ -23,11 +23,9 @@
 -export([info/2]).
 
 -include("rabbit_mqtt.hrl").
-
--type option(T) :: undefined | T.
+-include("rabbit_mqtt_packet.hrl").
 
 -define(HIBERNATE_AFTER, 1000).
--define(PROTO_FAMILY, 'MQTT').
 
 -record(state,
         {socket :: rabbit_net:socket(),
@@ -109,12 +107,18 @@ handle_call({info, InfoItems}, _From, State) ->
 handle_call(Msg, From, State) ->
     {stop, {mqtt_unexpected_call, Msg, From}, State}.
 
-handle_cast(duplicate_id,
-            State = #state{ proc_state = PState,
-                            conn_name  = ConnName }) ->
+%% Delete this backward compatibility clause when feature flag
+%% delete_ra_cluster_mqtt_node becomes required.
+handle_cast(duplicate_id, State) ->
+    handle_cast({duplicate_id, true}, State);
+
+handle_cast({duplicate_id, SendWill},
+            State = #state{proc_state = PState,
+                           conn_name = ConnName}) ->
     ?LOG_WARNING("MQTT disconnecting client ~tp with duplicate id '~ts'",
                  [ConnName, rabbit_mqtt_processor:info(client_id, PState)]),
-    {stop, {shutdown, duplicate_id}, State};
+    rabbit_mqtt_processor:send_disconnect(?RC_SESSION_TAKEN_OVER, PState),
+    {stop, {shutdown, duplicate_id}, {SendWill, State}};
 
 handle_cast(decommission_node,
             State = #state{ proc_state = PState,
@@ -128,7 +132,11 @@ handle_cast({close_connection, Reason},
             State = #state{conn_name = ConnName, proc_state = PState}) ->
     ?LOG_WARNING("MQTT disconnecting client ~tp with client ID '~ts', reason: ~ts",
                  [ConnName, rabbit_mqtt_processor:info(client_id, PState), Reason]),
-    {stop, {shutdown, server_initiated_close}, State};
+    case Reason of
+        maintenance -> rabbit_mqtt_processor:send_disconnect(?RC_SERVER_SHUTTING_DOWN, PState);
+        _ -> ok
+    end,
+    {stop, {shutdown, {disconnect, server_initiated}}, State};
 
 handle_cast(QueueEvent = {queue_event, _, _},
             State = #state{proc_state = PState0}) ->
@@ -140,7 +148,7 @@ handle_cast(QueueEvent = {queue_event, _, _},
     end;
 
 handle_cast({force_event_refresh, Ref}, State0) ->
-    Infos = infos(?CREATION_EVENT_KEYS, State0),
+    Infos = infos(?EVENT_KEYS, State0),
     rabbit_event:notify(connection_created, Infos, Ref),
     State = rabbit_event:init_stats_timer(State0, #state.stats_timer),
     {noreply, State, ?HIBERNATE_AFTER};
@@ -154,7 +162,7 @@ handle_cast(Msg, State) ->
     {stop, {mqtt_unexpected_cast, Msg}, State}.
 
 handle_info(connection_created, State) ->
-    Infos = infos(?CREATION_EVENT_KEYS, State),
+    Infos = infos(?EVENT_KEYS, State),
     rabbit_core_metrics:connection_created(self(), Infos),
     rabbit_event:notify(connection_created, Infos),
     {noreply, State, ?HIBERNATE_AFTER};
@@ -199,13 +207,15 @@ handle_info({bump_credit, Msg}, State) ->
     credit_flow:handle_bump_msg(Msg),
     maybe_process_deferred_recv(control_throttle(State));
 
-handle_info({keepalive, Req}, State = #state{keepalive = KState0,
+handle_info({keepalive, Req}, State = #state{proc_state = PState,
+                                             keepalive = KState0,
                                              conn_name = ConnName}) ->
     case rabbit_mqtt_keepalive:handle(Req, KState0) of
         {ok, KState} ->
             {noreply, State#state{keepalive = KState}, ?HIBERNATE_AFTER};
         {error, timeout} ->
             ?LOG_ERROR("closing MQTT connection ~p (keepalive timeout)", [ConnName]),
+            rabbit_mqtt_processor:send_disconnect(?RC_KEEP_ALIVE_TIMEOUT, PState),
             {stop, {shutdown, keepalive_timeout}, State};
         {error, Reason} ->
             {stop, Reason, State}
@@ -256,8 +266,7 @@ handle_info(Msg, State) ->
 
 terminate(Reason, State = #state{}) ->
     terminate(Reason, {true, State});
-terminate(Reason, {SendWill, State = #state{conn_name = ConnName,
-                                            keepalive = KState0,
+terminate(Reason, {SendWill, State = #state{keepalive = KState0,
                                             proc_state = PState}}) ->
     KState = rabbit_mqtt_keepalive:cancel_timer(KState0),
     maybe_emit_stats(State#state{keepalive = KState}),
@@ -265,7 +274,8 @@ terminate(Reason, {SendWill, State = #state{conn_name = ConnName,
         connect_packet_unprocessed ->
             ok;
         _ ->
-            rabbit_mqtt_processor:terminate(SendWill, ConnName, ?PROTO_FAMILY, PState)
+            Infos = infos(?EVENT_KEYS, State),
+            rabbit_mqtt_processor:terminate(SendWill, Infos, PState)
     end,
     log_terminate(Reason, State).
 
@@ -316,12 +326,12 @@ process_received_bytes(Bytes, State = #state{socket = Socket,
                                              parse_state = ParseState,
                                              proc_state = ProcState,
                                              conn_name = ConnName}) ->
-    case parse(Bytes, ParseState) of
+    try rabbit_mqtt_packet:parse(Bytes, ParseState) of
         {more, ParseState1} ->
             {noreply,
              ensure_stats_timer(State#state{parse_state = ParseState1}),
              ?HIBERNATE_AFTER};
-        {ok, Packet, Rest} ->
+        {ok, Packet, Rest, ParseState1} ->
             case ProcState of
                 connect_packet_unprocessed ->
                     Send = fun(Data) ->
@@ -337,16 +347,16 @@ process_received_bytes(Bytes, State = #state{socket = Socket,
                             ?LOG_INFO("Accepted MQTT connection ~ts for client ID ~ts",
                                       [ConnName, rabbit_mqtt_processor:info(client_id, ProcState1)]),
                             process_received_bytes(
-                              Rest, State#state{parse_state = rabbit_mqtt_packet:reset_state(),
+                              Rest, State#state{parse_state = ParseState1,
                                                 proc_state = ProcState1});
                         {error, {socket_ends, Reason} = R} ->
                             ?LOG_ERROR("MQTT connection ~ts failed to establish because socket "
                                        "addresses could not be determined: ~tp",
                                        [ConnName, Reason]),
                             {stop, {shutdown, R}, {_SendWill = false, State}};
-                        {error, ConnAckReturnCode} ->
-                            ?LOG_ERROR("Rejected MQTT connection ~ts with CONNACK return code ~p",
-                                       [ConnName, ConnAckReturnCode]),
+                        {error, ConnectReasonCode} ->
+                            ?LOG_ERROR("Rejected MQTT connection ~ts with Connect Reason Code ~p",
+                                       [ConnName, ConnectReasonCode]),
                             {stop, shutdown, {_SendWill = false, State}}
                     end;
                 _ ->
@@ -354,41 +364,38 @@ process_received_bytes(Bytes, State = #state{socket = Socket,
                         {ok, ProcState1} ->
                             process_received_bytes(
                               Rest,
-                              State #state{parse_state = rabbit_mqtt_packet:reset_state(),
+                              State #state{parse_state = ParseState1,
                                            proc_state = ProcState1});
-                        {error, unauthorized = Reason, ProcState1} ->
+                        {error, access_refused = Reason, ProcState1} ->
                             ?LOG_ERROR("MQTT connection ~ts is closing due to an authorization failure", [ConnName]),
                             {stop, {shutdown, Reason}, pstate(State, ProcState1)};
                         {error, Reason, ProcState1} ->
                             ?LOG_ERROR("MQTT protocol error on connection ~ts: ~tp", [ConnName, Reason]),
                             {stop, {shutdown, Reason}, pstate(State, ProcState1)};
-                        {stop, disconnect, ProcState1} ->
-                            {stop, normal, {_SendWill = false, pstate(State, ProcState1)}}
+                        {stop, {disconnect, server_initiated} = Reason, ProcState1} ->
+                            ?LOG_ERROR("MQTT protocol error on connection ~ts: ~tp", [ConnName, Reason]),
+                            {stop, {shutdown, Reason}, pstate(State, ProcState1)};
+                        {stop, {disconnect, {client_initiated, SendWill}}, ProcState1} ->
+                            {stop, normal, {SendWill, pstate(State, ProcState1)}}
                     end
             end;
-        {error, {cannot_parse, Reason, Stacktrace}} ->
-            ?LOG_ERROR("Unparseable MQTT packet received from connection ~ts", [ConnName]),
-            ?LOG_DEBUG("MQTT cannot parse a packet on connection '~ts', reason: ~tp, "
-                       "stacktrace: ~tp, payload (first 100 bytes): ~tp",
-                       [ConnName, Reason, Stacktrace, rabbit_mqtt_util:truncate_binary(Bytes, 100)]),
+        {error, {disconnect_reason_code, ReasonCode} = Reason} ->
+            rabbit_mqtt_processor:send_disconnect(ReasonCode, ProcState),
             {stop, {shutdown, Reason}, State};
         {error, Error} ->
-            ?LOG_ERROR("MQTT detected a framing error on connection ~ts: ~tp", [ConnName, Error]),
+            ?LOG_ERROR("MQTT detected a packet error on connection ~ts: ~tp", [ConnName, Error]),
             {stop, {shutdown, Error}, State}
+    catch _:Reason:Stacktrace ->
+              ?LOG_ERROR("Unparseable MQTT packet received from connection ~ts", [ConnName]),
+              ?LOG_DEBUG("MQTT cannot parse a packet on connection '~ts', reason: ~tp, "
+                         "stacktrace: ~tp, payload (first 100 bytes): ~tp",
+                         [ConnName, Reason, Stacktrace, rabbit_mqtt_util:truncate_binary(Bytes, 100)]),
+              {stop, {shutdown, Reason}, State}
     end.
 
 -spec pstate(state(), rabbit_mqtt_processor:state()) -> state().
 pstate(State = #state {}, PState) ->
     State #state{ proc_state = PState }.
-
-%%----------------------------------------------------------------------------
-parse(Bytes, ParseState) ->
-    try
-        rabbit_mqtt_packet:parse(Bytes, ParseState)
-    catch
-        _:Reason:Stacktrace ->
-            {error, {cannot_parse, Reason, Stacktrace}}
-    end.
 
 network_error(closed,
               State = #state{conn_name  = ConnName,
@@ -514,7 +521,7 @@ i(Cert, #state{socket = Sock})
 i(timeout, #state{keepalive = KState}) ->
     rabbit_mqtt_keepalive:interval_secs(KState);
 i(protocol, #state{proc_state = ProcState}) ->
-    {?PROTO_FAMILY, rabbit_mqtt_processor:proto_version_tuple(ProcState)};
+    {'MQTT', rabbit_mqtt_processor:proto_version_tuple(ProcState)};
 i(Key, #state{proc_state = ProcState}) ->
     rabbit_mqtt_processor:info(Key, ProcState).
 

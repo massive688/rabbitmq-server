@@ -19,8 +19,7 @@ all() ->
     [
       {group, unclustered_2_nodes},
       {group, unclustered_3_nodes},
-      {group, clustered_2_nodes},
-      {group, clustered_4_nodes}
+      {group, clustered_2_nodes}
     ].
 
 groups() ->
@@ -53,11 +52,6 @@ groups() ->
               await_running_count,
               start_with_invalid_schema_in_path,
               persistent_cluster_id
-            ]}
-        ]},
-      {clustered_4_nodes, [], [
-          {cluster_size_4, [], [
-              forget_promotes_offline_follower
             ]}
         ]}
     ].
@@ -377,50 +371,6 @@ forget_offline_removes_things(Config) ->
                                                           exchange    = X,
                                                           auto_delete = true,
                                                           passive     = true})),
-    ok.
-
-forget_promotes_offline_follower(Config) ->
-    [A, B, C, D] = rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
-    ACh = rabbit_ct_client_helpers:open_channel(Config, A),
-    QName = <<"mirrored-queue">>,
-    declare(ACh, QName),
-    set_ha_policy(Config, QName, A, [B, C]),
-    set_ha_policy(Config, QName, A, [C, D]), %% Test add and remove from recoverable_mirrors
-
-    %% Publish and confirm
-    amqp_channel:call(ACh, #'confirm.select'{}),
-    amqp_channel:cast(ACh, #'basic.publish'{routing_key = QName},
-                      #amqp_msg{props = #'P_basic'{delivery_mode = 2}}),
-    amqp_channel:wait_for_confirms(ACh),
-
-    %% We kill nodes rather than stop them in order to make sure
-    %% that we aren't dependent on anything that happens as they shut
-    %% down (see bug 26467).
-    ok = rabbit_ct_broker_helpers:kill_node(Config, D),
-    ok = rabbit_ct_broker_helpers:kill_node(Config, C),
-    ok = rabbit_ct_broker_helpers:kill_node(Config, B),
-    ok = rabbit_ct_broker_helpers:kill_node(Config, A),
-
-    {ok, _} = rabbit_ct_broker_helpers:rabbitmqctl(Config, C,
-      ["force_boot"]),
-
-    ok = rabbit_ct_broker_helpers:start_node(Config, C),
-
-    %% We should now have the following dramatis personae:
-    %% A - down, master
-    %% B - down, used to be mirror, no longer is, never had the message
-    %% C - running, should be mirror, but has wiped the message on restart
-    %% D - down, recoverable mirror, contains message
-    %%
-    %% So forgetting A should offline-promote the queue to D, keeping
-    %% the message.
-
-    {ok, _} = rabbit_ct_broker_helpers:rabbitmqctl(Config, C,
-      ["forget_cluster_node", A]),
-
-    ok = rabbit_ct_broker_helpers:start_node(Config, D),
-    DCh2 = rabbit_ct_client_helpers:open_channel(Config, D),
-    #'queue.declare_ok'{message_count = 1} = declare(DCh2, QName),
     ok.
 
 set_ha_policy(Config, QName, Master, Slaves) ->
@@ -791,8 +741,13 @@ wait_for_cluster_status(N, Max, Status, AllNodes, Nodes) ->
 
 verify_status_equal(Node, Status, AllNodes) ->
     NodeStatus = sort_cluster_status(cluster_status(Node)),
-    (AllNodes =/= [Node]) =:= rpc:call(Node, rabbit_db_cluster, is_clustered, [])
-        andalso equal(Status, NodeStatus).
+    IsClustered = case rpc:call(Node, rabbit_db_cluster, is_clustered, []) of
+                      {badrpc, {'EXIT', {undef, _}}} ->
+                          rpc:call(Node, rabbit_mnesia, is_clustered, []);
+                      Ret ->
+                          Ret
+                  end,
+    (AllNodes =/= [Node]) =:= IsClustered andalso equal(Status, NodeStatus).
 
 equal({_, _, A, B, C}, {undef, undef, A, B, C}) ->
     true;
@@ -802,11 +757,23 @@ equal(Status0, Status1) ->
     Status0 == Status1.
 
 cluster_status(Node) ->
-    {rpc:call(Node, rabbit_nodes, list_members, []),
-     rpc:call(Node, rabbit_nodes, list_running, []),
-     rpc:call(Node, rabbit_mnesia, cluster_nodes, [all]),
-     rpc:call(Node, rabbit_mnesia, cluster_nodes, [disc]),
-     rpc:call(Node, rabbit_mnesia, cluster_nodes, [running])}.
+    AllMembers = rpc:call(Node, rabbit_nodes, list_members, []),
+    RunningMembers = rpc:call(Node, rabbit_nodes, list_running, []),
+
+    AllDbNodes = case rpc:call(Node, rabbit_db_cluster, members, []) of
+                     {badrpc, {'EXIT', {undef, _}}} ->
+                         rpc:call(Node, rabbit_mnesia, cluster_nodes, [all]);
+                     Ret ->
+                         Ret
+                 end,
+    DiscDbNodes = rpc:call(Node, rabbit_mnesia, cluster_nodes, [disc]),
+    RunningDbNodes = rpc:call(Node, rabbit_mnesia, cluster_nodes, [running]),
+
+    {AllMembers,
+     RunningMembers,
+     AllDbNodes,
+     DiscDbNodes,
+     RunningDbNodes}.
 
 sort_cluster_status({{badrpc, {'EXIT', {undef, _}}}, {badrpc, {'EXIT', {undef, _}}}, AllM, DiscM, RunningM}) ->
     {undef, undef, lists:sort(AllM), lists:sort(DiscM), lists:sort(RunningM)};

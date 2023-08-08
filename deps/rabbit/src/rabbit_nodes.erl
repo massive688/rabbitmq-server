@@ -30,6 +30,7 @@
 -export([all/0, all_running_with_hashes/0, target_cluster_size_hint/0, reached_target_cluster_size/0,
          if_reached_target_cluster_size/2]).
 -export([lock_id/1, lock_retries/0]).
+-export([me_in_nodes/1, nodes_incl_me/1, nodes_excl_me/1]).
 
 -deprecated({all, 0, "Use rabbit_nodes:list_members/0 instead"}).
 -deprecated({all_running, 0, "Use rabbit_nodes:list_running/0 instead"}).
@@ -281,14 +282,17 @@ do_filter_reachable(Members) ->
       Members).
 
 -spec is_running(Node) -> IsRunning when
-      Node :: node(),
+      Node :: node() | [node()],
       IsRunning :: boolean().
 %% @doc Indicates if the given node is running.
 %%
 %% @see filter_running/1.
 
 is_running(Node) when is_atom(Node) ->
-    [Node] =:= filter_running([Node]).
+    [Node] =:= filter_running([Node]);
+is_running(Nodes) when is_list(Nodes) ->
+    lists:sort(Nodes) =:= lists:sort(filter_running(Nodes)).
+
 
 -spec list_running() -> Nodes when
       Nodes :: [node()].
@@ -580,6 +584,11 @@ lock_id(Node) ->
 lock_retries() ->
     cluster_formation_key_or_default(internal_lock_retries, ?DEFAULT_LOCK_RETRIES).
 
+me_in_nodes(Nodes) -> lists:member(node(), Nodes).
+
+nodes_incl_me(Nodes) -> lists:usort([node()|Nodes]).
+
+nodes_excl_me(Nodes) -> Nodes -- [node()].
 
 %%
 %% Implementation

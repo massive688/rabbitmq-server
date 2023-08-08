@@ -19,30 +19,33 @@
          teardown_steps/0,
          get_node_config/3,
          rabbitmqctl/3,
-         rpc/4,
+         rpc/4, rpc/5,
          stop_node/2
         ]).
+
+-import(rabbit_ct_helpers,
+        [eventually/3]).
 
 -define(OPTS, [{connect_timeout, 1},
                {ack_timeout, 1}]).
 
 all() ->
     [
-     {group, cluster_size_5}
+     {group, v4},
+     {group, v5}
     ].
 
 groups() ->
     [
-     {cluster_size_5, [],
-      [
-       connection_id_tracking,
-       connection_id_tracking_on_nodedown,
-       connection_id_tracking_with_decommissioned_node
-      ]}
+     {v4, [], cluster_size_5()},
+     {v5, [], cluster_size_5()}
     ].
-
-suite() ->
-    [{timetrap, {minutes, 3}}].
+cluster_size_5() ->
+    [
+     connection_id_tracking,
+     connection_id_tracking_on_nodedown,
+     connection_id_tracking_with_decommissioned_node
+    ].
 
 %% -------------------------------------------------------------------
 %% Testsuite setup/teardown.
@@ -63,9 +66,10 @@ init_per_suite(Config) ->
 end_per_suite(Config) ->
     rabbit_ct_helpers:run_teardown_steps(Config).
 
-init_per_group(cluster_size_5, Config) ->
+init_per_group(Group, Config) ->
     rabbit_ct_helpers:set_config(
-      Config, [{rmq_nodes_count, 5}]).
+      Config, [{rmq_nodes_count, 5},
+               {mqtt_version, Group}]).
 
 end_per_group(_, Config) ->
     Config.
@@ -79,13 +83,14 @@ init_per_testcase(Testcase, Config) ->
                                tcp_port_mqtt_tls_extra]},
         {rmq_nodes_clustered, true}
       ]),
-    rabbit_ct_helpers:run_setup_steps(Config1,
+    Config2 = rabbit_ct_helpers:run_setup_steps(Config1,
       [ fun merge_app_env/1 ] ++
       setup_steps() ++
-      rabbit_ct_client_helpers:setup_steps()).
+      rabbit_ct_client_helpers:setup_steps()),
+    util:maybe_skip_v5(Config2).
 
 end_per_testcase(Testcase, Config) ->
-    rabbit_ct_helpers:run_teardown_steps(Config,
+    rabbit_ct_helpers:run_steps(Config,
       rabbit_ct_client_helpers:teardown_steps() ++
       teardown_steps()),
     rabbit_ct_helpers:testcase_finished(Config, Testcase).
@@ -130,17 +135,15 @@ connection_id_tracking(Config) ->
     ok = emqtt:disconnect(C3).
 
 connection_id_tracking_on_nodedown(Config) ->
-    Server = get_node_config(Config, 0, nodename),
     C = connect(<<"simpleClient">>, Config, ?OPTS),
     {ok, _, _} = emqtt:subscribe(C, <<"TopicA">>, qos0),
     ok = emqtt:publish(C, <<"TopicA">>, <<"Payload">>),
     ok = expect_publishes(C, <<"TopicA">>, [<<"Payload">>]),
     assert_connection_count(Config, 4, 1),
     process_flag(trap_exit, true),
-    ok = stop_node(Config, Server),
+    ok = stop_node(Config, 0),
     await_exit(C),
-    assert_connection_count(Config, 4, 0),
-    ok.
+    ok = eventually(?_assertEqual([], util:all_connection_pids(1, Config)), 500, 4).
 
 connection_id_tracking_with_decommissioned_node(Config) ->
     case rpc(Config, rabbit_mqtt_ff, track_client_id_in_ra, []) of

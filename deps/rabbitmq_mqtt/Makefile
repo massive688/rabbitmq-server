@@ -11,7 +11,7 @@ define PROJECT_ENV
 	    {allow_anonymous, true},
 	    {vhost, <<"/">>},
 	    {exchange, <<"amq.topic">>},
-	    {subscription_ttl, 86400000}, %% 24 hours
+	    {max_session_expiry_interval_seconds, 86400}, %% 1 day
 	    {retained_message_store, rabbit_mqtt_retained_msg_store_dets},
 	    %% only used by DETS store
 	    {retained_message_store_dets_sync_interval, 2000},
@@ -27,7 +27,11 @@ define PROJECT_ENV
 	                         ]},
 	    {proxy_protocol, false},
 	    {sparkplug, false},
-	    {mailbox_soft_limit, 200}
+	    {mailbox_soft_limit, 200},
+	    {max_packet_size_unauthenticated, 65536},
+	    %% 256 MB is upper limit defined by MQTT spec
+	    {max_packet_size_authenticated, 268435455},
+	    {topic_alias_maximum, 16}
 	  ]
 endef
 
@@ -39,11 +43,12 @@ endef
 BUILD_WITHOUT_QUIC=1
 export BUILD_WITHOUT_QUIC
 
-DEPS = ranch rabbit_common rabbit amqp_client ra
-TEST_DEPS = emqtt ct_helper rabbitmq_ct_helpers rabbitmq_ct_client_helpers rabbitmq_management rabbitmq_web_mqtt
+LOCAL_DEPS = ssl
+DEPS = ranch rabbit_common rabbit ra
+TEST_DEPS = emqtt ct_helper rabbitmq_ct_helpers rabbitmq_ct_client_helpers rabbitmq_management rabbitmq_web_mqtt amqp_client
 
 dep_ct_helper = git https://github.com/extend/ct_helper.git master
-dep_emqtt = git https://github.com/emqx/emqtt.git 1.8.2
+dep_emqtt = git https://github.com/rabbitmq/emqtt.git master
 
 DEP_EARLY_PLUGINS = rabbit_common/mk/rabbitmq-early-plugin.mk
 DEP_PLUGINS = rabbit_common/mk/rabbitmq-plugin.mk

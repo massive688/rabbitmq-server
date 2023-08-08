@@ -4,7 +4,12 @@
 %%
 %% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
 
-%% Test suite shared between rabbitmq_mqtt and rabbitmq_web_mqtt.
+%% This test suite contains test cases that are shared between (i.e. executed across):
+%% 1. plugins rabbitmq_mqtt and rabbitmq_web_mqtt
+%% 2. MQTT versions v3, v4 and v5
+%%
+%% In other words, this test suite should not contain any test case that is executed
+%% only with a particular plugin or particular MQTT version.
 -module(shared_SUITE).
 -compile([export_all,
           nowarn_export_all]).
@@ -30,93 +35,119 @@
          eventually/1]).
 -import(util,
         [all_connection_pids/1,
-         get_global_counters/2, get_global_counters/3, get_global_counters/4,
+         get_global_counters/1, get_global_counters/2,
+         get_global_counters/3, get_global_counters/4,
          expect_publishes/3,
          connect/2, connect/3, connect/4,
          get_events/1, assert_event_type/2, assert_event_prop/2,
          await_exit/1, await_exit/2,
-         publish_qos1_timeout/4]).
+         publish_qos1_timeout/4,
+         non_clean_sess_opts/0]).
 -import(rabbit_mgmt_test_util,
         [http_get/2,
          http_delete/3]).
 
+%% defined in MQTT v5 (not in v4 or v3)
+-define(RC_SERVER_SHUTTING_DOWN, 16#8B).
+-define(RC_KEEP_ALIVE_TIMEOUT, 16#8D).
+-define(RC_SESSION_TAKEN_OVER, 16#8E).
+
 all() ->
-    [
-     {group, mqtt}
-     ,{group, web_mqtt}
-    ].
+    [{group, mqtt},
+     {group, web_mqtt}].
 
 groups() ->
     [
-     {mqtt, [], subgroups()}
-     ,{web_mqtt, [], subgroups()}
-    ].
-
-subgroups() ->
-    [
-     {cluster_size_1, [],
-      [
-       {global_counters, [],
-        [
-         global_counters_v3,
-         global_counters_v4
-        ]},
-       {tests, [],
-        [
-         block_only_publisher
-         ,many_qos1_messages
-         ,subscription_ttl
-         ,management_plugin_connection
-         ,management_plugin_enable
-         ,disconnect
-         ,pubsub_shared_connection
-         ,pubsub_separate_connections
-         ,will_with_disconnect
-         ,will_without_disconnect
-         ,quorum_queue_rejects
-         ,events
-         ,internal_event_handler
-         ,non_clean_sess_reconnect_qos1
-         ,non_clean_sess_reconnect_qos0
-         ,non_clean_sess_reconnect_qos0_and_qos1
-         ,non_clean_sess_empty_client_id
-         ,subscribe_same_topic_same_qos
-         ,subscribe_same_topic_different_qos
-         ,subscribe_multiple
-         ,large_message_mqtt_to_mqtt
-         ,large_message_amqp_to_mqtt
-         ,keepalive
-         ,keepalive_turned_off
-         ,duplicate_client_id
-         ,block
-         ,amqp_to_mqtt_qos0
-         ,clean_session_disconnect_client
-         ,clean_session_kill_node
-         ,rabbit_status_connection_count
-         ,trace
-         ,max_packet_size_unauthenticated
-         ,default_queue_type
-        ]}
+     {mqtt, [],
+      [{v3, [],
+        [{cluster_size_1, [], cluster_size_1_tests()},
+         {cluster_size_3, [], cluster_size_3_tests()}]},
+       {v4, [],
+        [{cluster_size_1, [], cluster_size_1_tests()},
+         {cluster_size_3, [], cluster_size_3_tests()}]},
+       {v5, [],
+        [{cluster_size_1, [], cluster_size_1_tests()},
+         {cluster_size_3, [], cluster_size_3_tests()}]}
       ]},
-     {cluster_size_3, [],
-      [
-       queue_down_qos1,
-       consuming_classic_mirrored_queue_down,
-       consuming_classic_queue_down,
-       flow_classic_mirrored_queue,
-       flow_quorum_queue,
-       flow_stream,
-       rabbit_mqtt_qos0_queue,
-       cli_list_queues,
-       maintenance,
-       delete_create_queue,
-       publish_to_all_queue_types_qos0,
-       publish_to_all_queue_types_qos1
+     {web_mqtt, [],
+      [{v3, [],
+        [{cluster_size_1, [], cluster_size_1_tests()},
+         {cluster_size_3, [], cluster_size_3_tests()}]},
+       {v4, [],
+        [{cluster_size_1, [], cluster_size_1_tests()},
+         {cluster_size_3, [], cluster_size_3_tests()}]},
+       {v5, [],
+        [{cluster_size_1, [], cluster_size_1_tests()},
+         {cluster_size_3, [], cluster_size_3_tests()}]}
       ]}
     ].
 
+cluster_size_1_tests() ->
+    [
+     global_counters %% must be the 1st test case
+     ,block_only_publisher
+     ,many_qos1_messages
+     ,session_expiry
+     ,management_plugin_connection
+     ,management_plugin_enable
+     ,disconnect
+     ,pubsub_shared_connection
+     ,pubsub_separate_connections
+     ,will_with_disconnect
+     ,will_without_disconnect
+     ,decode_basic_properties
+     ,quorum_queue_rejects
+     ,events
+     ,internal_event_handler
+     ,non_clean_sess_reconnect_qos1
+     ,non_clean_sess_reconnect_qos0
+     ,non_clean_sess_reconnect_qos0_and_qos1
+     ,non_clean_sess_empty_client_id
+     ,subscribe_same_topic_same_qos
+     ,subscribe_same_topic_different_qos
+     ,subscribe_multiple
+     ,large_message_mqtt_to_mqtt
+     ,large_message_amqp_to_mqtt
+     ,keepalive
+     ,keepalive_turned_off
+     ,block
+     ,amqp_to_mqtt_qos0
+     ,clean_session_disconnect_client
+     ,clean_session_node_restart
+     ,clean_session_node_kill
+     ,rabbit_status_connection_count
+     ,trace
+     ,max_packet_size_unauthenticated
+     ,max_packet_size_authenticated
+     ,default_queue_type
+     ,incoming_message_interceptors
+     ,utf8
+     ,retained_message_conversion
+     ,bind_exchange_to_exchange
+     ,bind_exchange_to_exchange_single_message
+    ].
+
+cluster_size_3_tests() ->
+    [
+     queue_down_qos1,
+     consuming_classic_mirrored_queue_down,
+     consuming_classic_queue_down,
+     flow_classic_mirrored_queue,
+     flow_quorum_queue,
+     flow_stream,
+     rabbit_mqtt_qos0_queue,
+     cli_list_queues,
+     maintenance,
+     delete_create_queue,
+     publish_to_all_queue_types_qos0,
+     publish_to_all_queue_types_qos1,
+     duplicate_client_id,
+     session_reconnect,
+     session_takeover
+    ].
+
 suite() ->
-    [{timetrap, {minutes, 5}}].
+    [{timetrap, {minutes, 10}}].
 
 %% -------------------------------------------------------------------
 %% Testsuite setup/teardown.
@@ -134,41 +165,42 @@ init_per_group(mqtt, Config) ->
 init_per_group(web_mqtt, Config) ->
     rabbit_ct_helpers:set_config(Config, {websocket, true});
 
-init_per_group(cluster_size_1, Config) ->
-    rabbit_ct_helpers:set_config(Config, [{rmq_nodes_count, 1}]);
-init_per_group(cluster_size_3 = Group, Config) ->
-    init_per_group0(Group,
-                    rabbit_ct_helpers:set_config(Config, [{rmq_nodes_count, 3}]));
 init_per_group(Group, Config)
-  when Group =:= global_counters orelse
-       Group =:= tests ->
-    init_per_group0(Group, Config).
+  when Group =:= v3;
+       Group =:= v4;
+       Group =:= v5 ->
+    rabbit_ct_helpers:set_config(Config, {mqtt_version, Group});
 
-init_per_group0(Group, Config0) ->
-    Suffix = lists:flatten(io_lib:format("~s_websocket_~w", [Group, ?config(websocket, Config0)])),
+init_per_group(Group, Config0) ->
+    Nodes = case Group of
+                cluster_size_1 -> 1;
+                cluster_size_3 -> 3
+            end,
+    Suffix = rabbit_ct_helpers:testcase_absname(Config0, "", "-"),
     Config1 = rabbit_ct_helpers:set_config(
                 Config0,
-                [{rmq_nodename_suffix, Suffix},
+                [{rmq_nodes_count, Nodes},
+                 {rmq_nodename_suffix, Suffix},
                  {rmq_extra_tcp_ports, [tcp_port_mqtt_extra,
                                         tcp_port_mqtt_tls_extra]}]),
-    Config = rabbit_ct_helpers:merge_app_env(
-               Config1,
-               {rabbit, [{classic_queue_default_version, 2}]}),
-    rabbit_ct_helpers:run_steps(
-      Config,
-      rabbit_ct_broker_helpers:setup_steps() ++
-      rabbit_ct_client_helpers:setup_steps()).
+    Config2 = rabbit_ct_helpers:merge_app_env(
+                Config1,
+                {rabbit, [{classic_queue_default_version, 2}]}),
+    Config = rabbit_ct_helpers:run_steps(
+               Config2,
+               rabbit_ct_broker_helpers:setup_steps() ++
+               rabbit_ct_client_helpers:setup_steps()),
+    util:maybe_skip_v5(Config).
 
 end_per_group(G, Config)
-  when G =:= mqtt;
-       G =:= web_mqtt;
-       G =:= cluster_size_1 ->
-    Config;
-end_per_group(_, Config) ->
-    rabbit_ct_helpers:run_teardown_steps(
+  when G =:= cluster_size_1;
+       G =:= cluster_size_3 ->
+    rabbit_ct_helpers:run_steps(
       Config,
       rabbit_ct_client_helpers:teardown_steps() ++
-      rabbit_ct_broker_helpers:teardown_steps()).
+      rabbit_ct_broker_helpers:teardown_steps());
+end_per_group(_, Config) ->
+    Config.
 
 init_per_testcase(T, Config)
   when T =:= management_plugin_connection;
@@ -193,6 +225,8 @@ end_per_testcase(Testcase, Config) ->
 
 end_per_testcase0(Testcase, Config) ->
     rabbit_ct_client_helpers:close_channels_and_connection(Config, 0),
+    %% Assert that every testcase cleaned up their MQTT sessions.
+    eventually(?_assertEqual([], rpc(Config, rabbit_amqqueue, list, []))),
     rabbit_ct_helpers:testcase_finished(Config, Testcase).
 
 %% -------------------------------------------------------------------
@@ -264,17 +298,36 @@ will_without_disconnect(Config) ->
             {will_payload, LastWillMsg},
             {will_qos, 1}],
     Pub = connect(<<(atom_to_binary(?FUNCTION_NAME))/binary, "_publisher">>, Config, Opts),
-    timer:sleep(100),
-    [ServerPublisherPid] = all_connection_pids(Config),
     Sub = connect(<<(atom_to_binary(?FUNCTION_NAME))/binary, "_subscriber">>, Config),
     {ok, _, [1]} = emqtt:subscribe(Sub, LastWillTopic, qos1),
 
     %% Client does not send DISCONNECT packet. Therefore, will message should be sent.
     unlink(Pub),
-    erlang:exit(ServerPublisherPid, test_will),
+    erlang:exit(Pub, test_will),
     ?assertEqual(ok, expect_publishes(Sub, LastWillTopic, [LastWillMsg])),
 
     ok = emqtt:disconnect(Sub).
+
+%% Test that an MQTT connection decodes the AMQP 0.9.1 'P_basic' properties.
+%% see https://github.com/rabbitmq/rabbitmq-server/discussions/8252
+decode_basic_properties(Config) ->
+    App = rabbitmq_mqtt,
+    Par = durable_queue_type,
+    ok = rpc(Config, application, set_env, [App, Par, quorum]),
+    ClientId = Topic = Payload = atom_to_binary(?FUNCTION_NAME),
+    C1 = connect(ClientId, Config, non_clean_sess_opts()),
+    {ok, _, [1]} = emqtt:subscribe(C1, Topic, qos1),
+    QuorumQueues = rpc(Config, rabbit_amqqueue, list_by_type, [rabbit_quorum_queue]),
+    ?assertEqual(1, length(QuorumQueues)),
+    Ch = rabbit_ct_client_helpers:open_channel(Config),
+    amqp_channel:call(Ch, #'basic.publish'{exchange = <<"amq.topic">>,
+                                           routing_key = Topic},
+                      #amqp_msg{payload = Payload}),
+    ok = expect_publishes(C1, Topic, [Payload]),
+    ok = emqtt:disconnect(C1),
+    C2 = connect(ClientId, Config, [{clean_start, true}]),
+    ok = emqtt:disconnect(C2),
+    ok = rpc(Config, application, unset_env, [App, Par]).
 
 quorum_queue_rejects(Config) ->
     {_Conn, Ch} = rabbit_ct_client_helpers:open_connection_and_channel(Config),
@@ -433,18 +486,27 @@ events(Config) ->
                       E0),
     assert_event_type(connection_created, E1),
     [ConnectionPid] = all_connection_pids(Config),
-    Proto = case ?config(websocket, Config) of
-                true -> 'Web MQTT';
-                false -> 'MQTT'
-            end,
-    ExpectedConnectionProps = [{protocol, {Proto, {3,1,1}}},
+    ProtoName = case ?config(websocket, Config) of
+                    true -> 'Web MQTT';
+                    false -> 'MQTT'
+                end,
+    ProtoVer = case ?config(mqtt_version, Config) of
+                   v3 -> {3,1,0};
+                   v4 -> {3,1,1};
+                   v5 -> {5,0}
+               end,
+    ExpectedConnectionProps = [{protocol, {ProtoName, ProtoVer}},
                                {node, Server},
                                {vhost, <<"/">>},
                                {user, <<"guest">>},
+                               {client_properties, [{client_id, longstr, ClientId}]},
                                {pid, ConnectionPid}],
     assert_event_prop(ExpectedConnectionProps, E1),
 
-    {ok, _, _} = emqtt:subscribe(C, <<"TopicA">>, qos0),
+    Qos = 0,
+    MqttTopic = <<"my/topic">>,
+    AmqpTopic = <<"my.topic">>,
+    {ok, _, [Qos]} = emqtt:subscribe(C, MqttTopic, Qos),
 
     QueueNameBin = <<"mqtt-subscription-", ClientId/binary, "qos0">>,
     QueueName = {resource, <<"/">>, queue, QueueNameBin},
@@ -472,15 +534,20 @@ events(Config) ->
                        {arguments, []}],
                       E2),
     assert_event_type(binding_created, E3),
+    ExpectedBindingArgs = case ?config(mqtt_version, Config) of
+                              v5 -> [{mqtt_subscription_opts, Qos, false, false, 0, undefined},
+                                     {<<"x-binding-key">>, longstr, AmqpTopic}];
+                              _ -> []
+                          end,
     assert_event_prop([{source_name, <<"amq.topic">>},
                        {source_kind, exchange},
                        {destination_name, QueueNameBin},
                        {destination_kind, queue},
-                       {routing_key, <<"TopicA">>},
-                       {arguments, []}],
+                       {routing_key, AmqpTopic},
+                       {arguments, ExpectedBindingArgs}],
                       E3),
 
-    {ok, _, _} = emqtt:unsubscribe(C, <<"TopicA">>),
+    {ok, _, _} = emqtt:unsubscribe(C, MqttTopic),
 
     [E5] = get_events(Server),
     assert_event_type(binding_deleted, E5),
@@ -489,7 +556,10 @@ events(Config) ->
 
     [E6, E7 | E8] = get_events(Server),
     assert_event_type(connection_closed, E6),
-    assert_event_prop(ExpectedConnectionProps, E6),
+    ?assertEqual(E1#event.props, E6#event.props,
+                 "connection_closed event props should match connection_created event props. "
+                 "See https://github.com/rabbitmq/rabbitmq-server/discussions/6331"),
+
     case is_feature_flag_enabled(Config, rabbit_mqtt_qos0_queue) of
         true ->
             assert_event_type(queue_deleted, E7),
@@ -508,14 +578,8 @@ internal_event_handler(Config) ->
     Server = get_node_config(Config, 0, nodename),
     ok = gen_event:call({rabbit_event, Server}, rabbit_mqtt_internal_event_handler, ignored_request, 1000).
 
-global_counters_v3(Config) ->
-    global_counters(Config, v3).
-
-global_counters_v4(Config) ->
-    global_counters(Config, v4).
-
-global_counters(Config, ProtoVer) ->
-    C = connect(?FUNCTION_NAME, Config, [{proto_ver, ProtoVer}]),
+global_counters(Config) ->
+    C = connect(?FUNCTION_NAME, Config),
 
     Topic0 = <<"test-topic0">>,
     Topic1 = <<"test-topic1">>,
@@ -528,12 +592,18 @@ global_counters(Config, ProtoVer) ->
     ok = emqtt:publish(C, Topic1, <<"testm1">>, qos0),
     {ok, _} = emqtt:publish(C, Topic2, <<"testm2">>, qos1),
     ok = emqtt:publish(C, <<"no/queue/bound">>, <<"msg-dropped">>, qos0),
-    {ok, _} = emqtt:publish(C, <<"no/queue/bound">>, <<"msg-returned">>, qos1),
+    {ok, Pub} = emqtt:publish(C, <<"no/queue/bound">>, <<"msg-returned">>, qos1),
+    case ?config(mqtt_version, Config) of
+        v3 -> ok;
+        v4 -> ok;
+        v5 -> ?assertMatch(#{reason_code_name := no_matching_subscribers}, Pub)
+    end,
 
     ok = expect_publishes(C, Topic0, [<<"testm0">>]),
     ok = expect_publishes(C, Topic1, [<<"testm1">>]),
     ok = expect_publishes(C, Topic2, [<<"testm2">>]),
 
+    ProtoVer = ?config(mqtt_version, Config),
     ?assertEqual(#{publishers => 1,
                    consumers => 1,
                    messages_confirmed_total => 2,
@@ -626,12 +696,12 @@ consuming_classic_mirrored_queue_down(Config) ->
             {<<"queue-master-locator">>, <<"client-local">>}]),
 
     %% Declare queue leader on Server1.
-    C1 = connect(ClientId, Config, Server1, [{clean_start, false}]),
+    C1 = connect(ClientId, Config, Server1, non_clean_sess_opts()),
     {ok, _, _} = emqtt:subscribe(C1, Topic, qos1),
     ok = emqtt:disconnect(C1),
 
     %% Consume from Server2.
-    C2 = connect(ClientId, Config, Server2, [{clean_start, false}]),
+    C2 = connect(ClientId, Config, Server2, non_clean_sess_opts()),
 
     %% Sanity check that consumption works.
     {ok, _} = emqtt:publish(C2, Topic, <<"m1">>, qos1),
@@ -661,14 +731,14 @@ consuming_classic_queue_down(Config) ->
     ClientId = Topic = atom_to_binary(?FUNCTION_NAME),
 
     %% Declare classic queue on Server1.
-    C1 = connect(ClientId, Config, [{clean_start, false}]),
+    C1 = connect(ClientId, Config, non_clean_sess_opts()),
     {ok, _, _} = emqtt:subscribe(C1, Topic, qos1),
     ok = emqtt:disconnect(C1),
 
     %% Consume from Server3.
-    C2 = connect(ClientId, Config, Server3, [{clean_start, false}]),
+    C2 = connect(ClientId, Config, Server3, non_clean_sess_opts()),
 
-    ProtoVer = v4,
+    ProtoVer = ?config(mqtt_version, Config),
     ?assertMatch(#{consumers := 1},
                  get_global_counters(Config, ProtoVer, Server3)),
 
@@ -752,21 +822,23 @@ delete_create_queue(Config) ->
     delete_queue(Ch, [CQ1, CQ2, QQ]),
     ok = emqtt:disconnect(C).
 
-subscription_ttl(Config) ->
-    TTL = 1000,
+session_expiry(Config) ->
     App = rabbitmq_mqtt,
-    Par = ClientId = ?FUNCTION_NAME,
+    Par = max_session_expiry_interval_seconds,
+    Seconds = 1,
     {ok, DefaultVal} = rpc(Config, application, get_env, [App, Par]),
-    ok = rpc(Config, application, set_env, [App, Par, TTL]),
+    ok = rpc(Config, application, set_env, [App, Par, Seconds]),
 
-    C = connect(ClientId, Config, [{clean_start, false}]),
+    C = connect(?FUNCTION_NAME, Config, non_clean_sess_opts()),
     {ok, _, [0, 1]} = emqtt:subscribe(C, [{<<"topic0">>, qos0},
                                           {<<"topic1">>, qos1}]),
     ok = emqtt:disconnect(C),
 
     ?assertEqual(2, rpc(Config, rabbit_amqqueue, count, [])),
-    timer:sleep(TTL + 100),
-    ?assertEqual(0,  rpc(Config, rabbit_amqqueue, count, [])),
+    timer:sleep(timer:seconds(Seconds) + 100),
+    %% On a slow machine, this test might fail. Let's consider
+    %% the expiry on a longer time window
+    ?awaitMatch(0,  rpc(Config, rabbit_amqqueue, count, []), 15_000, 1000),
 
     ok = rpc(Config, application, set_env, [App, Par, DefaultVal]).
 
@@ -779,24 +851,26 @@ non_clean_sess_reconnect_qos0(Config) ->
 non_clean_sess_reconnect(Config, SubscriptionQoS) ->
     Pub = connect(<<"publisher">>, Config),
     Topic = ClientId = atom_to_binary(?FUNCTION_NAME),
-    ProtoVer = v4,
 
-    C1 = connect(ClientId, Config, [{clean_start, false}]),
+    C1 = connect(ClientId, Config, non_clean_sess_opts()),
     {ok, _, _} = emqtt:subscribe(C1, Topic, SubscriptionQoS),
     ?assertMatch(#{consumers := 1},
-                 get_global_counters(Config, ProtoVer)),
+                 get_global_counters(Config)),
 
     ok = emqtt:disconnect(C1),
-    ?assertMatch(#{consumers := 0},
-                 get_global_counters(Config, ProtoVer)),
+    eventually(?_assertMatch(#{consumers := 0},
+                             get_global_counters(Config))),
 
     timer:sleep(20),
     ok = emqtt:publish(Pub, Topic, <<"msg-3-qos0">>, qos0),
     {ok, _} = emqtt:publish(Pub, Topic, <<"msg-4-qos1">>, qos1),
 
-    C2 = connect(ClientId, Config, [{clean_start, false}]),
+    C2 = connect(ClientId, Config, non_clean_sess_opts()),
+    %% Server should reply in CONNACK that it has session state.
+    ?assertEqual({session_present, 1},
+                 proplists:lookup(session_present, emqtt:info(C2))),
     ?assertMatch(#{consumers := 1},
-                 get_global_counters(Config, ProtoVer)),
+                 get_global_counters(Config)),
 
     ok = emqtt:publish(Pub, Topic, <<"msg-5-qos0">>, qos0),
     {ok, _} = emqtt:publish(Pub, Topic, <<"msg-6-qos1">>, qos1),
@@ -804,7 +878,7 @@ non_clean_sess_reconnect(Config, SubscriptionQoS) ->
     %% shouldn't receive message after unsubscribe
     {ok, _, _} = emqtt:unsubscribe(C2, Topic),
     ?assertMatch(#{consumers := 0},
-                 get_global_counters(Config, ProtoVer)),
+                 get_global_counters(Config)),
     {ok, _} = emqtt:publish(Pub, Topic, <<"msg-7-qos0">>, qos1),
 
     %% "After the disconnection of a Session that had CleanSession set to 0, the Server MUST store
@@ -824,26 +898,25 @@ non_clean_sess_reconnect(Config, SubscriptionQoS) ->
 
 non_clean_sess_reconnect_qos0_and_qos1(Config) ->
     Pub = connect(<<"publisher">>, Config),
-    ProtoVer = v4,
     Topic0 = <<"t/0">>,
     Topic1 = <<"t/1">>,
     ClientId = ?FUNCTION_NAME,
 
-    C1 = connect(ClientId, Config, [{clean_start, false}]),
+    C1 = connect(ClientId, Config, non_clean_sess_opts()),
     {ok, _, [1, 0]} = emqtt:subscribe(C1, [{Topic1, qos1}, {Topic0, qos0}]),
     ?assertMatch(#{consumers := 1},
-                 get_global_counters(Config, ProtoVer)),
+                 get_global_counters(Config)),
 
     ok = emqtt:disconnect(C1),
-    ?assertMatch(#{consumers := 0},
-                 get_global_counters(Config, ProtoVer)),
+    eventually(?_assertMatch(#{consumers := 0},
+                             get_global_counters(Config))),
 
     {ok, _} = emqtt:publish(Pub, Topic0, <<"msg-0">>, qos1),
     {ok, _} = emqtt:publish(Pub, Topic1, <<"msg-1">>, qos1),
 
-    C2 = connect(ClientId, Config, [{clean_start, false}]),
+    C2 = connect(ClientId, Config, non_clean_sess_opts()),
     ?assertMatch(#{consumers := 1},
-                 get_global_counters(Config, ProtoVer)),
+                 get_global_counters(Config)),
 
     ok = expect_publishes(C2, Topic0, [<<"msg-0">>]),
     ok = expect_publishes(C2, Topic1, [<<"msg-1">>]),
@@ -853,15 +926,28 @@ non_clean_sess_reconnect_qos0_and_qos1(Config) ->
     C3 = connect(ClientId, Config, [{clean_start, true}]),
     ok = emqtt:disconnect(C3).
 
-%% "If the Client supplies a zero-byte ClientId with CleanSession set to 0,
-%% the Server MUST respond to the CONNECT Packet with a CONNACK return code 0x02
-%% (Identifier rejected) and then close the Network Connection" [MQTT-3.1.3-8].
 non_clean_sess_empty_client_id(Config) ->
-    {C, Connect} = util:start_client(<<>>, Config, 0, [{clean_start, false}]),
-    process_flag(trap_exit, true),
-    ?assertMatch({error, {client_identifier_not_valid, _}},
-                 Connect(C)),
-    ok = await_exit(C).
+    {C, Connect} = util:start_client(<<>>, Config, 0, non_clean_sess_opts()),
+    case ?config(mqtt_version, Config) of
+        V when V =:= v3;
+               V =:= v4 ->
+            %% "If the Client supplies a zero-byte ClientId with CleanSession set to 0,
+            %% the Server MUST respond to the CONNECT Packet with a CONNACK return code 0x02
+            %% (Identifier rejected) and then close the Network Connection" [MQTT-3.1.3-8].
+            process_flag(trap_exit, true),
+            ?assertMatch({error, {client_identifier_not_valid, _}}, Connect(C)),
+            ok = await_exit(C);
+        v5 ->
+            %% "If the Client connects using a zero length Client Identifier, the Server MUST respond with
+            %% a CONNACK containing an Assigned Client Identifier. The Assigned Client Identifier MUST be
+            %% a new Client Identifier not used by any other Session currently in the Server [MQTT-3.2.2-16]."
+            {ok, #{'Assigned-Client-Identifier' := ClientId}} = Connect(C),
+            {C2, Connect2} = util:start_client(<<>>, Config, 0, [{clean_start, true}]),
+            {ok, #{'Assigned-Client-Identifier' := ClientId2}} = Connect2(C2),
+            ?assertNotEqual(ClientId, ClientId2),
+            ok = emqtt:disconnect(C),
+            ok = emqtt:disconnect(C2)
+    end.
 
 subscribe_same_topic_same_qos(Config) ->
     C = connect(?FUNCTION_NAME, Config),
@@ -883,7 +969,7 @@ subscribe_same_topic_same_qos(Config) ->
     ok = emqtt:disconnect(C).
 
 subscribe_same_topic_different_qos(Config) ->
-    C = connect(?FUNCTION_NAME, Config, [{clean_start, false}]),
+    C = connect(?FUNCTION_NAME, Config, non_clean_sess_opts()),
     Topic = <<"b/c">>,
 
     {ok, _} = emqtt:publish(C, Topic, <<"retained">>, [{retain, true},
@@ -969,7 +1055,7 @@ many_qos1_messages(Config) ->
     lists:foreach(fun(P) ->
                           {ok, _} = emqtt:publish(C, Topic, P, qos1)
                   end, Payloads),
-    expect_publishes(C, Topic, Payloads),
+    ok = expect_publishes(C, Topic, Payloads),
     ok = emqtt:disconnect(C).
 
 %% This test is mostly interesting in mixed version mode where feature flag
@@ -1058,6 +1144,7 @@ maintenance(Config) ->
     C0 = connect(<<"client-0">>, Config, 0, []),
     C1a = connect(<<"client-1a">>, Config, 1, []),
     C1b = connect(<<"client-1b">>, Config, 1, []),
+    ClientsNode1 = [C1a, C1b],
 
     timer:sleep(500),
 
@@ -1068,22 +1155,22 @@ maintenance(Config) ->
 
     process_flag(trap_exit, true),
     ok = drain_node(Config, 1),
-    [await_exit(Pid) || Pid <- [C1a, C1b]],
+    [await_exit(Pid) || Pid <- ClientsNode1],
+    [assert_v5_disconnect_reason_code(Config, ?RC_SERVER_SHUTTING_DOWN) || _ <- ClientsNode1],
     ok = revive_node(Config, 1),
     ?assert(erlang:is_process_alive(C0)),
 
     ok = drain_node(Config, 0),
     await_exit(C0),
+    assert_v5_disconnect_reason_code(Config, ?RC_SERVER_SHUTTING_DOWN),
     ok = revive_node(Config, 0).
 
 keepalive(Config) ->
     KeepaliveSecs = 1,
     KeepaliveMs = timer:seconds(KeepaliveSecs),
-    ProtoVer = v4,
     WillTopic = <<"will/topic">>,
     WillPayload = <<"will-payload">>,
     C1 = connect(?FUNCTION_NAME, Config, [{keepalive, KeepaliveSecs},
-                                          {proto_ver, ProtoVer},
                                           {will_topic, WillTopic},
                                           {will_payload, WillPayload},
                                           {will_retain, true},
@@ -1093,7 +1180,7 @@ keepalive(Config) ->
     %% Connection should stay up when client sends PING requests.
     timer:sleep(KeepaliveMs),
     ?assertMatch(#{publishers := 1},
-                 util:get_global_counters(Config, ProtoVer)),
+                 util:get_global_counters(Config)),
 
     %% Mock the server socket to not have received any bytes.
     rabbit_ct_broker_helpers:setup_meck(Config),
@@ -1104,10 +1191,11 @@ keepalive(Config) ->
 
     %% We expect the server to respect the keepalive closing the connection.
     eventually(?_assertMatch(#{publishers := 0},
-                             util:get_global_counters(Config, ProtoVer)),
-               KeepaliveMs, 3 * KeepaliveSecs),
-    await_exit(C1),
+                             util:get_global_counters(Config)),
+               KeepaliveMs, 4 * KeepaliveSecs),
 
+    await_exit(C1),
+    assert_v5_disconnect_reason_code(Config, ?RC_KEEP_ALIVE_TIMEOUT),
     true = rpc(Config, meck, validate, [Mod]),
     ok = rpc(Config, meck, unload, [Mod]),
 
@@ -1142,17 +1230,66 @@ keepalive_turned_off(Config) ->
     ok = emqtt:disconnect(C).
 
 duplicate_client_id(Config) ->
-    DuplicateClientId = ?FUNCTION_NAME,
-    C1 = connect(DuplicateClientId, Config),
-    eventually(?_assertEqual(1, length(all_connection_pids(Config)))),
-
+    [Server1, Server2, _] = rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
+    %% Test session takeover by both new and old node in mixed version clusters.
+    ClientId1 = <<"c1">>,
+    ClientId2 = <<"c2">>,
+    C1a = connect(ClientId1, Config, Server2, []),
+    C2a = connect(ClientId2, Config, Server1, []),
+    eventually(?_assertEqual(2, length(all_connection_pids(Config)))),
     process_flag(trap_exit, true),
-    C2 = connect(DuplicateClientId, Config),
-    await_exit(C1),
+    C1b = connect(ClientId1, Config, Server1, []),
+    C2b = connect(ClientId2, Config, Server2, []),
+    assert_v5_disconnect_reason_code(Config, ?RC_SESSION_TAKEN_OVER),
+    assert_v5_disconnect_reason_code(Config, ?RC_SESSION_TAKEN_OVER),
+    await_exit(C1a),
+    await_exit(C2a),
     timer:sleep(200),
-    ?assertEqual(1, length(all_connection_pids(Config))),
+    ?assertEqual(2, length(all_connection_pids(Config))),
+    ok = emqtt:disconnect(C1b),
+    ok = emqtt:disconnect(C2b),
+    eventually(?_assertEqual(0, length(all_connection_pids(Config)))).
 
-    ok = emqtt:disconnect(C2).
+session_reconnect(Config) ->
+    session_switch(Config, true).
+
+session_takeover(Config) ->
+    session_switch(Config, false).
+
+session_switch(Config, Disconnect) ->
+    Topic = ClientId = atom_to_binary(?FUNCTION_NAME),
+    %% Connect to old node in mixed version cluster.
+    C1 = connect(ClientId, Config, 1, [non_clean_sess_opts()]),
+    {ok, _, [1]} = emqtt:subscribe(C1, Topic, qos1),
+    case Disconnect of
+        true -> ok = emqtt:disconnect(C1);
+        false -> unlink(C1)
+    end,
+    %% Connect to new node in mixed version cluster.
+    C2 = connect(ClientId, Config, 0, [non_clean_sess_opts()]),
+    case Disconnect of
+        true -> ok;
+        false -> assert_v5_disconnect_reason_code(Config, ?RC_SESSION_TAKEN_OVER)
+    end,
+    %% New connection should be able to modify subscription.
+    {ok, _, [0]} = emqtt:subscribe(C2, Topic, qos0),
+    {ok, _} = emqtt:publish(C2, Topic, <<"m1">>, qos1),
+    receive {publish, #{client_pid := C2,
+                        payload := <<"m1">>,
+                        qos := 0}} -> ok
+    after 1000 -> ct:fail("did not receive m1 with QoS 0")
+    end,
+    %% New connection should be able to unsubscribe.
+    ?assertMatch({ok, _, _}, emqtt:unsubscribe(C2, Topic)),
+    {ok, _} = emqtt:publish(C2, Topic, <<"m2">>, qos1),
+    receive Unexpected -> ct:fail({unexpected, Unexpected})
+    after 300 -> ok
+    end,
+
+    ok = emqtt:disconnect(C2),
+    C3 = connect(ClientId, Config, 0, [{clean_start, true}]),
+    ok = emqtt:disconnect(C3),
+    eventually(?_assertEqual([], all_connection_pids(Config))).
 
 block(Config) ->
     Topic = ClientId = atom_to_binary(?FUNCTION_NAME),
@@ -1179,7 +1316,7 @@ block(Config) ->
 block_only_publisher(Config) ->
     Topic = atom_to_binary(?FUNCTION_NAME),
 
-    Opts = [{ack_timeout, 1}],
+    Opts = [{ack_timeout, 2}],
     Con = connect(<<"background-connection">>, Config, Opts),
     Sub = connect(<<"subscriber-connection">>, Config, Opts),
     Pub = connect(<<"publisher-connection">>, Config, Opts),
@@ -1245,7 +1382,13 @@ clean_session_disconnect_client(Config) ->
     L = rpc(Config, rabbit_amqqueue, list, []),
     ?assertEqual(0, length(L)).
 
-clean_session_kill_node(Config) ->
+clean_session_node_restart(Config) ->
+    clean_session_node_down(stop_node, Config).
+
+clean_session_node_kill(Config) ->
+    clean_session_node_down(kill_node, Config).
+
+clean_session_node_down(NodeDown, Config) ->
     C = connect(?FUNCTION_NAME, Config),
     {ok, _, _} = emqtt:subscribe(C, <<"topic0">>, qos0),
     {ok, _, _} = emqtt:subscribe(C, <<"topic1">>, qos1),
@@ -1259,15 +1402,24 @@ clean_session_kill_node(Config) ->
             ?assertEqual(0, length(QsQos0)),
             ?assertEqual(2, length(QsClassic))
     end,
-    ?assertEqual(2, rpc(Config, ets, info, [rabbit_durable_queue, size])),
+    Tables = [rabbit_durable_queue,
+              rabbit_queue,
+              rabbit_durable_route,
+              rabbit_semi_durable_route,
+              rabbit_route,
+              rabbit_reverse_route,
+              rabbit_topic_trie_node,
+              rabbit_topic_trie_edge,
+              rabbit_topic_trie_binding],
+    [?assertNotEqual(0, rpc(Config, ets, info, [T, size])) || T <- Tables],
 
     unlink(C),
-    ok = rabbit_ct_broker_helpers:kill_node(Config, 0),
+    ok = rabbit_ct_broker_helpers:NodeDown(Config, 0),
     ok = rabbit_ct_broker_helpers:start_node(Config, 0),
 
-    %% After terminating a clean session by a node crash, we expect any session
-    %% state to be cleaned up on the server once the server comes back up.
-    ?assertEqual(0, rpc(Config, ets, info, [rabbit_durable_queue, size])).
+    %% After terminating a clean session by either node crash or graceful node shutdown, we
+    %% expect any session state to be cleaned up on the server once the server finished booting.
+    [?assertEqual(0, rpc(Config, ets, info, [T, size])) || T <- Tables].
 
 rabbit_status_connection_count(Config) ->
     _Pid = rabbit_ct_client_helpers:open_connection(Config, 0),
@@ -1297,6 +1449,7 @@ trace(Config) ->
     {ok, _, [0]} = emqtt:subscribe(Sub, Topic, qos0),
     {ok, _} = emqtt:publish(Pub, Topic, Payload, qos1),
     ok = expect_publishes(Sub, Topic, [Payload]),
+    timer:sleep(10),
 
     {#'basic.get_ok'{routing_key = <<"publish.amq.topic">>},
      #amqp_msg{props = #'P_basic'{headers = PublishHeaders},
@@ -1340,8 +1493,7 @@ trace(Config) ->
     [ok = emqtt:disconnect(C) || C <- [Pub, Sub]].
 
 max_packet_size_unauthenticated(Config) ->
-    App = rabbitmq_mqtt,
-    Par = ClientId = ?FUNCTION_NAME,
+    ClientId = ?FUNCTION_NAME,
     Opts = [{will_topic, <<"will/topic">>}],
 
     {C1, Connect} = util:start_client(
@@ -1350,8 +1502,10 @@ max_packet_size_unauthenticated(Config) ->
     ?assertMatch({ok, _}, Connect(C1)),
     ok = emqtt:disconnect(C1),
 
+    Key = mqtt_max_packet_size_unauthenticated,
+    OldMaxSize = rpc(Config, persistent_term, get, [Key]),
     MaxSize = 500,
-    ok = rpc(Config, application, set_env, [App, Par, MaxSize]),
+    ok = rpc(Config, persistent_term, put, [Key, MaxSize]),
 
     {C2, Connect} = util:start_client(
                       ClientId, Config, 0,
@@ -1365,7 +1519,29 @@ max_packet_size_unauthenticated(Config) ->
     ?assertMatch({ok, _}, Connect(C3)),
     ok = emqtt:disconnect(C3),
 
-    ok = rpc(Config, application, unset_env, [App, Par]).
+    ok = rpc(Config, persistent_term, put, [Key, OldMaxSize]).
+
+max_packet_size_authenticated(Config) ->
+    Topic = ClientId = atom_to_binary(?FUNCTION_NAME),
+    Key = mqtt_max_packet_size_authenticated,
+    OldMaxSize = rpc(Config, persistent_term, get, [Key]),
+    MaxSize = 500,
+    ok = rpc(Config, persistent_term, put, [Key, MaxSize]),
+
+    {C, Connect} = util:start_client(ClientId, Config, 0, []),
+    {ok, ConnAckProps} = Connect(C),
+    process_flag(trap_exit, true),
+    ok = emqtt:publish(C, Topic, binary:copy(<<"x">>, MaxSize + 1), qos0),
+    await_exit(C),
+    case ?config(mqtt_version, Config) of
+        v3 -> ok;
+        v4 -> ok;
+        v5 -> ?assertMatch(#{'Maximum-Packet-Size' := MaxSize}, ConnAckProps),
+              receive {disconnected, _ReasonCodePacketTooLarge = 149, _Props} -> ok
+              after 1000 -> ct:fail("missing DISCONNECT packet from server")
+              end
+    end,
+    ok = rpc(Config, persistent_term, put, [Key, OldMaxSize]).
 
 %% Test that the per vhost default queue type introduced in
 %% https://github.com/rabbitmq/rabbitmq-server/pull/5305
@@ -1392,7 +1568,7 @@ default_queue_type(Config) ->
     %% Test that the configured default queue type does not apply to MQTT.
     Creds = [{username, <<Vhost/binary, ":guest">>},
              {password, <<"guest">>}],
-    C1 = connect(ClientId, Config, [{clean_start, false} | Creds]),
+    C1 = connect(ClientId, Config, Creds ++ non_clean_sess_opts()),
     {ok, _, [1]} = emqtt:subscribe(C1, Topic, qos1),
     ClassicQueues = rpc(Config, rabbit_amqqueue, list_by_type, [rabbit_classic_queue]),
     ?assertEqual(1, length(ClassicQueues)),
@@ -1401,6 +1577,126 @@ default_queue_type(Config) ->
     C2 = connect(ClientId, Config, [{clean_start, true} | Creds]),
     ok = emqtt:disconnect(C2),
     ok = rabbit_ct_broker_helpers:delete_vhost(Config, Vhost).
+
+incoming_message_interceptors(Config) ->
+    Key = {rabbit, ?FUNCTION_NAME},
+    ok = rpc(Config, persistent_term, put, [Key, [{set_header_timestamp, false}]]),
+    Ch = rabbit_ct_client_helpers:open_channel(Config),
+    Payload = ClientId = QName = Topic = atom_to_binary(?FUNCTION_NAME),
+    declare_queue(Ch, QName, []),
+    bind(Ch, QName, Topic),
+    C = connect(ClientId, Config),
+    ok = emqtt:publish(C, Topic, Payload),
+    NowSecs = os:system_time(second),
+    NowMs = os:system_time(millisecond),
+    eventually(
+      ?_assertMatch(
+         {#'basic.get_ok'{},
+          #amqp_msg{payload = Payload,
+                    props = #'P_basic'{
+                               timestamp = Secs,
+                               headers = [{<<"timestamp_in_ms">>, long, Ms} | _XHeaders]
+                              }}}
+           when Ms < NowMs + 4000 andalso
+                Ms > NowMs - 4000 andalso
+                Secs < NowSecs + 4 andalso
+                Secs > NowSecs - 4,
+         amqp_channel:call(Ch, #'basic.get'{queue = QName}))),
+
+    delete_queue(Ch, QName),
+    true = rpc(Config, persistent_term, erase, [Key]),
+    ok = emqtt:disconnect(C).
+
+%% This test makes sure that a retained message that got written in 3.12 or earlier
+%% can be consumed in 3.13 or later.
+retained_message_conversion(Config) ->
+    Topic = <<"a/b">>,
+    Payload = <<"my retained msg">>,
+    OldMqttMsgFormat = {mqtt_msg, _Retain = true, _QoS = 1, Topic, _Dup = false, _PktId = 1, Payload},
+    RetainerPid = rpc(Config, rabbit_mqtt_retainer_sup, start_child_for_vhost, [<<"/">>]),
+    {rabbit_mqtt_retainer, StoreState, _} = sys:get_state(RetainerPid),
+    ok = rpc(Config, rabbit_mqtt_retained_msg_store, insert, [Topic, OldMqttMsgFormat, StoreState]),
+
+    C = connect(?FUNCTION_NAME, Config),
+    {ok, _, [1]} = emqtt:subscribe(C, Topic, qos1),
+    receive {publish, #{client_pid := C,
+                        dup := false,
+                        qos := 1,
+                        retain := true,
+                        topic := Topic,
+                        payload := Payload}} -> ok
+    after 1000 -> ct:fail("missing retained message")
+    end,
+    ok = emqtt:publish(C, Topic, <<>>, [{retain, true}]),
+    ok = emqtt:disconnect(C).
+
+%% Test that the server can handle UTF-8 encoded strings.
+utf8(Config) ->
+    C = connect(?FUNCTION_NAME, Config),
+    % "The Topic Name MUST be present as the first field in the PUBLISH Packet Variable header.
+    % It MUST be a UTF-8 encoded string [MQTT-3.3.2-1] as defined in section 1.5.3."
+    Topic = <<"うさぎ"/utf8>>, %% Rabbit in Japanese
+    {ok, _, [1]} = emqtt:subscribe(C, Topic, qos1),
+    {ok, _} = emqtt:publish(C, Topic, <<"msg">>, qos1),
+    ok = expect_publishes(C, Topic, [<<"msg">>]),
+    ok = emqtt:disconnect(C).
+
+bind_exchange_to_exchange(Config) ->
+    SourceX = <<"amq.topic">>,
+    DestinationX = <<"destination">>,
+    Q = <<"q">>,
+    Ch = rabbit_ct_client_helpers:open_channel(Config),
+    #'exchange.declare_ok'{} = amqp_channel:call(Ch, #'exchange.declare'{exchange = DestinationX,
+                                                                         durable = true,
+                                                                         auto_delete = true}),
+    #'queue.declare_ok'{} = amqp_channel:call(Ch, #'queue.declare'{queue = Q,
+                                                                   durable = true}),
+    #'queue.bind_ok'{} = amqp_channel:call(Ch, #'queue.bind'{exchange = DestinationX,
+                                                             queue = Q,
+                                                             routing_key = <<"a.b">>}),
+    #'exchange.bind_ok'{} = amqp_channel:call(Ch, #'exchange.bind'{destination = DestinationX,
+                                                                   source = SourceX,
+                                                                   routing_key = <<"*.b">>}),
+    C = connect(?FUNCTION_NAME, Config),
+    %% Message should be routed as follows: SourceX -> DestinationX -> Q
+    {ok, _} = emqtt:publish(C, <<"a/b">>, <<"msg">>, qos1),
+    eventually(?_assertMatch({#'basic.get_ok'{}, #amqp_msg{payload = <<"msg">>}},
+                             amqp_channel:call(Ch, #'basic.get'{queue = Q}))),
+    #'queue.delete_ok'{message_count = 0} = amqp_channel:call(Ch, #'queue.delete'{queue = Q}),
+    ok = emqtt:disconnect(C).
+
+bind_exchange_to_exchange_single_message(Config) ->
+    SourceX = <<"amq.topic">>,
+    DestinationX = <<"destination">>,
+    Q = <<"q">>,
+    Ch = rabbit_ct_client_helpers:open_channel(Config),
+    #'exchange.declare_ok'{} = amqp_channel:call(Ch, #'exchange.declare'{exchange = DestinationX,
+                                                                         durable = true,
+                                                                         auto_delete = true}),
+    #'queue.declare_ok'{} = amqp_channel:call(Ch, #'queue.declare'{queue = Q,
+                                                                   durable = true}),
+    #'queue.bind_ok'{} = amqp_channel:call(Ch, #'queue.bind'{queue = Q,
+                                                             exchange = DestinationX,
+                                                             routing_key = <<"a.b">>}),
+    #'exchange.bind_ok'{} = amqp_channel:call(Ch, #'exchange.bind'{destination = DestinationX,
+                                                                   source = SourceX,
+                                                                   routing_key = <<"*.b">>}),
+    #'queue.bind_ok'{} = amqp_channel:call(Ch, #'queue.bind'{queue = Q,
+                                                             exchange = SourceX,
+                                                             routing_key = <<"a.b">>}),
+    C = connect(?FUNCTION_NAME, Config),
+    %% Message should be routed as follows:
+    %% SourceX -> DestinationX -> Q and
+    %% SourceX -> Q
+    {ok, _} = emqtt:publish(C, <<"a/b">>, <<"msg">>, qos1),
+    %% However, since we publish only one time a single message and have a single destination queue,
+    %% we expect only one copy of the message to end up in the destination queue.
+    eventually(?_assertMatch({#'basic.get_ok'{}, #amqp_msg{payload = <<"msg">>}},
+                             amqp_channel:call(Ch, #'basic.get'{queue = Q}))),
+    timer:sleep(10),
+    ?assertEqual(#'queue.delete_ok'{message_count = 0},
+                 amqp_channel:call(Ch, #'queue.delete'{queue = Q})),
+    ok = emqtt:disconnect(C).
 
 %% -------------------------------------------------------------------
 %% Internal helpers
@@ -1457,3 +1753,12 @@ bind(Ch, QueueName, Topic)
                            Ch, #'queue.bind'{queue       = QueueName,
                                              exchange    = <<"amq.topic">>,
                                              routing_key = Topic}).
+
+assert_v5_disconnect_reason_code(Config, ReasonCode) ->
+    case ?config(mqtt_version, Config) of
+        v3 -> ok;
+        v4 -> ok;
+        v5 -> receive {disconnected, ReasonCode, _Props} -> ok
+              after 1000 -> ct:fail("missing DISCONNECT packet from server")
+              end
+    end.

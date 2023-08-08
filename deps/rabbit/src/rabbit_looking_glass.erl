@@ -61,7 +61,7 @@ trace(Input) ->
             )).
 
 trace_qq() ->
-    dbg:stop_clear(),
+    dbg:stop(),
     lg:trace([ra_server,
               ra_server_proc,
               rabbit_fifo,
@@ -78,7 +78,7 @@ trace_qq() ->
                             ]
             )),
     timer:sleep(10000),
-    lg:stop(),
+    _ = lg:stop(),
     profile().
 
 profile() ->

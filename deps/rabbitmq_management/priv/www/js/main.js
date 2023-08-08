@@ -111,11 +111,24 @@ function check_login () {
   if (!isNaN(user_login_session_timeout)) {
     update_login_session_timeout(user_login_session_timeout)
   }
-  setup_global_vars()
+
+  ui_data_model.vhosts = JSON.parse(sync_get('/vhosts'));
+  ac.update(user, ui_data_model)
+  if (ac.isMonitoringUser()) {
+    ui_data_model.nodes = JSON.parse(sync_get('/nodes'))
+  }
+  var overview = JSON.parse(sync_get('/overview'))
+
+  display.update(overview, ui_data_model)
+
+  setup_global_vars(overview)
+
   setup_constant_events()
   update_vhosts()
   update_interval()
   setup_extensions()
+
+
   return true
 }
 
@@ -183,17 +196,18 @@ function setup_constant_events() {
 }
 
 function update_vhosts() {
-    var vhosts = JSON.parse(sync_get('/vhosts'));
-    vhosts_interesting = vhosts.length > 1;
-    if (vhosts_interesting)
+    if (display.vhosts) {
         $('#vhost-form').show();
-    else
+        $('li#vhost').show();
+    }else {
         $('#vhost-form').hide();
+        $('li#vhost').hide();
+    }
     var select = $('#show-vhost').get(0);
-    select.options.length = vhosts.length + 1;
+    select.options.length = ui_data_model.vhosts.length + 1;
     var index = 0;
-    for (var i = 0; i < vhosts.length; i++) {
-        var vhost = vhosts[i].name;
+    for (var i = 0; i < ui_data_model.vhosts.length; i++) {
+        var vhost = ui_data_model.vhosts[i].name;
         select.options[i + 1] = new Option(vhost, vhost);
         if (vhost == current_vhost) index = i + 1;
     }
@@ -253,7 +267,9 @@ function set_timer_interval(interval) {
 }
 
 function reset_timer() {
-    clearInterval(timer);
+    if (timer != null) {
+        clearInterval(timer);
+    }
     if (timer_interval != null) {
         timer = setInterval(partial_update, timer_interval);
     }
@@ -344,13 +360,15 @@ function update_navigation() {
         var selected = false;
         if (contains_current_highlight(val)) {
             selected = true;
-            if (!leaf(val)) {
-                descend = nav(val);
+            if (!leaf(val) && val[2] && ac.canAccessVhosts()) {
+                descend = nav(val)
             }
         }
         if (show(path)) {
-            l1 += '<li><a href="' + nav(path) + '"' +
-                (selected ? ' class="selected"' : '') + '>' + k + '</a></li>';
+          if (val.length < 3 || ( val[2] && ac.canAccessVhosts() )) {
+            l1 += '<li id="' + navigation_tab_id(k) + '"><a href="' + nav(path) + '"' +
+                (selected ? ' class="selected"' : '') + '>' + k + '</a></li>'
+          }
         }
     }
 
@@ -366,12 +384,21 @@ function update_navigation() {
     replace_content('rhs', l2);
 }
 
+function navigation_tab_id(value) {
+    return value.toLowerCase().replaceAll(/\s/g, "-")
+}
+
 function nav(pair) {
     return pair[0];
 }
 
 function show(pair) {
-    return jQuery.inArray(pair[1], user_tags) != -1;
+    var hasUserTag = jQuery.inArray(pair[1], user_tags) != -1
+    if (pair.length > 2 && pair[2]) {
+      return hasUserTag && ac.canAccessVhosts()
+    } else {
+      return hasUserTag
+    }
 }
 
 function leaf(pair) {
@@ -733,13 +760,31 @@ function postprocess() {
     update_multifields();
 }
 
+function is_valid_regexp(value) {
+    try {
+        var _ = new RegExp(value, 'i');
+        return true;
+    } catch (e) {
+        return false;
+    }
+}
+
 function url_pagination_template_context(template, context, defaultPage, defaultPageSize){
     var page_number_request = fmt_page_number_request(context, defaultPage);
     var page_size = fmt_page_size_request(context, defaultPageSize);
     var name_request = fmt_filter_name_request(context, "");
     var use_regex = fmt_regex_request(context, "") == "checked";
     if (use_regex) {
-        name_request = esc(name_request);
+        // rabbitmq/rabbitmq-server#8008: if the expression cannot be compiled to a reg exp,
+        // assume a regular text filter
+        var valid_regexp = is_valid_regexp(name_request);
+        if (!valid_regexp) {
+            show_popup('warn', fmt_escape_html(`Filter expression '${name_request}' is not a valid regular expression, will perform a regular text query`));
+            use_regex = false;
+        }
+        if (use_regex && valid_regexp) {
+            name_request = esc(name_request);
+        }
     }
     return  '/' + template +
         '?page=' +  page_number_request +

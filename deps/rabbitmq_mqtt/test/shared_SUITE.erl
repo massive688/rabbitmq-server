@@ -117,6 +117,7 @@ cluster_size_1_tests() ->
      ,clean_session_node_kill
      ,rabbit_status_connection_count
      ,trace
+     ,trace_large_message
      ,max_packet_size_unauthenticated
      ,max_packet_size_authenticated
      ,default_queue_type
@@ -129,6 +130,7 @@ cluster_size_1_tests() ->
 
 cluster_size_3_tests() ->
     [
+     pubsub,
      queue_down_qos1,
      consuming_classic_mirrored_queue_down,
      consuming_classic_queue_down,
@@ -180,9 +182,7 @@ init_per_group(Group, Config0) ->
     Config1 = rabbit_ct_helpers:set_config(
                 Config0,
                 [{rmq_nodes_count, Nodes},
-                 {rmq_nodename_suffix, Suffix},
-                 {rmq_extra_tcp_ports, [tcp_port_mqtt_extra,
-                                        tcp_port_mqtt_tls_extra]}]),
+                 {rmq_nodename_suffix, Suffix}]),
     Config2 = rabbit_ct_helpers:merge_app_env(
                 Config1,
                 {rabbit, [{classic_queue_default_version, 2}]}),
@@ -340,19 +340,34 @@ quorum_queue_rejects(Config) ->
     bind(Ch, Name, Name),
 
     C = connect(Name, Config, [{retry_interval, 1}]),
-    {ok, _} = emqtt:publish(C, Name, <<"m1">>, qos1),
-    {ok, _} = emqtt:publish(C, Name, <<"m2">>, qos1),
-    %% We expect m3 to be rejected and dropped.
-    ?assertEqual(puback_timeout, util:publish_qos1_timeout(C, Name, <<"m3">>, 700)),
+    {ok, #{reason_code_name := success}} = emqtt:publish(C, Name, <<"m1">>, qos1),
+    {ok, #{reason_code_name := success}} = emqtt:publish(C, Name, <<"m2">>, qos1),
+
+    %% The queue will reject m3.
+    V = ?config(mqtt_version, Config),
+    if V =:= v3 orelse V =:= v4 ->
+           %% v3 and v4 do not support NACKs. Therefore, the server should drop the message.
+           ?assertEqual(puback_timeout, util:publish_qos1_timeout(C, Name, <<"m3">>, 700));
+       V =:= v5 ->
+           %% v5 supports NACKs. Therefore, the server should send us a NACK.
+           ?assertMatch({ok, #{reason_code_name := implementation_specific_error}},
+                        emqtt:publish(C, Name, <<"m3">>, qos1))
+    end,
 
     ?assertMatch({#'basic.get_ok'{}, #amqp_msg{payload = <<"m1">>}},
-                 amqp_channel:call(Ch, #'basic.get'{queue = Name, no_ack = true})),
+                 amqp_channel:call(Ch, #'basic.get'{queue = Name})),
     ?assertMatch({#'basic.get_ok'{}, #amqp_msg{payload = <<"m2">>}},
-                 amqp_channel:call(Ch, #'basic.get'{queue = Name, no_ack = true})),
-    %% m3 is re-sent by emqtt.
-    ?awaitMatch({#'basic.get_ok'{}, #amqp_msg{payload = <<"m3">>}},
-                amqp_channel:call(Ch, #'basic.get'{queue = Name, no_ack = true}),
-                2000, 200),
+                 amqp_channel:call(Ch, #'basic.get'{queue = Name})),
+    if V =:= v3 orelse V =:= v4 ->
+           %% m3 is re-sent by emqtt since we didn't receive a PUBACK.
+           ?awaitMatch({#'basic.get_ok'{}, #amqp_msg{payload = <<"m3">>}},
+                       amqp_channel:call(Ch, #'basic.get'{queue = Name}),
+                       2000, 200);
+       V =:= v5 ->
+           %% m3 should not be re-sent by emqtt since we received a PUBACK.
+           ?assertMatch(#'basic.get_empty'{},
+                        amqp_channel:call(Ch, #'basic.get'{queue = Name}))
+    end,
 
     ok = emqtt:disconnect(C),
     delete_queue(Ch, Name),
@@ -660,6 +675,45 @@ global_counters(Config) ->
                                messages_unroutable_returned_total => 1},
                              get_global_counters(Config, ProtoVer))).
 
+pubsub(Config) ->
+    Topic0 = <<"t/0">>,
+    Topic1 = <<"t/1">>,
+    C0 = connect(<<"c0">>, Config, 0, []),
+    C1 = connect(<<"c1">>, Config, 1, []),
+    {ok, _, [1]} = emqtt:subscribe(C0, Topic0, qos1),
+    {ok, _, [1]} = emqtt:subscribe(C1, Topic1, qos1),
+
+    {ok, _} = emqtt:publish(C0, Topic1, <<"m1">>, qos1),
+    receive {publish, #{client_pid := C1,
+                        qos := 1,
+                        payload := <<"m1">>}} -> ok
+    after 1000 -> ct:fail("missing m1")
+    end,
+
+    ok = emqtt:publish(C0, Topic1, <<"m2">>, qos0),
+    receive {publish, #{client_pid := C1,
+                        qos := 0,
+                        payload := <<"m2">>}} -> ok
+    after 1000 -> ct:fail("missing m2")
+    end,
+
+    {ok, _} = emqtt:publish(C1, Topic0, <<"m3">>, qos1),
+    receive {publish, #{client_pid := C0,
+                        qos := 1,
+                        payload := <<"m3">>}} -> ok
+    after 1000 -> ct:fail("missing m3")
+    end,
+
+    ok = emqtt:publish(C1, Topic0, <<"m4">>, qos0),
+    receive {publish, #{client_pid := C0,
+                        qos := 0,
+                        payload := <<"m4">>}} -> ok
+    after 1000 -> ct:fail("missing m4")
+    end,
+
+    ok = emqtt:disconnect(C0),
+    ok = emqtt:disconnect(C1).
+
 queue_down_qos1(Config) ->
     {Conn1, Ch1} = rabbit_ct_client_helpers:open_connection_and_channel(Config, 1),
     CQ = Topic = atom_to_binary(?FUNCTION_NAME),
@@ -667,17 +721,22 @@ queue_down_qos1(Config) ->
     bind(Ch1, CQ, Topic),
     ok = rabbit_ct_client_helpers:close_connection_and_channel(Conn1, Ch1),
     ok = rabbit_ct_broker_helpers:stop_node(Config, 1),
-
     C = connect(?FUNCTION_NAME, Config, [{retry_interval, 2}]),
 
     %% classic queue is down, therefore message is rejected
-    ?assertEqual(puback_timeout, util:publish_qos1_timeout(C, Topic, <<"msg">>, 500)),
-
-    ok = rabbit_ct_broker_helpers:start_node(Config, 1),
-    %% classic queue is up, therefore message should arrive
-    eventually(?_assertEqual([[<<"1">>]],
-                             rabbitmqctl_list(Config, 1, ["list_queues", "messages", "--no-table-headers"])),
-               500, 20),
+    V = ?config(mqtt_version, Config),
+    if V =:= v3 orelse V =:= v4 ->
+           ?assertEqual(puback_timeout, util:publish_qos1_timeout(C, Topic, <<"msg">>, 500)),
+           ok = rabbit_ct_broker_helpers:start_node(Config, 1),
+           %% Classic queue is up. Therefore, message should arrive.
+           eventually(?_assertEqual([[<<"1">>]],
+                                    rabbitmqctl_list(Config, 1, ["list_queues", "messages", "--no-table-headers"])),
+                      500, 20);
+       V =:= v5 ->
+           ?assertMatch({ok, #{reason_code_name := implementation_specific_error}},
+                        emqtt:publish(C, Topic, <<"msg">>, qos1)),
+           ok = rabbit_ct_broker_helpers:start_node(Config, 1)
+    end,
 
     Ch0 = rabbit_ct_client_helpers:open_channel(Config, 0),
     delete_queue(Ch0, CQ),
@@ -1454,7 +1513,7 @@ trace(Config) ->
     {#'basic.get_ok'{routing_key = <<"publish.amq.topic">>},
      #amqp_msg{props = #'P_basic'{headers = PublishHeaders},
                payload = Payload}} =
-    amqp_channel:call(Ch, #'basic.get'{queue = TraceQ, no_ack = false}),
+    amqp_channel:call(Ch, #'basic.get'{queue = TraceQ}),
     ?assertMatch(#{<<"exchange_name">> := <<"amq.topic">>,
                    <<"routing_keys">> := [Topic],
                    <<"connection">> := <<"127.0.0.1:", _/binary>>,
@@ -1462,15 +1521,14 @@ trace(Config) ->
                    <<"vhost">> := <<"/">>,
                    <<"channel">> := 0,
                    <<"user">> := <<"guest">>,
-                   <<"properties">> := #{<<"delivery_mode">> := 2,
-                                         <<"headers">> := #{<<"x-mqtt-publish-qos">> := 1}},
+                   <<"properties">> := #{<<"delivery_mode">> := 2},
                    <<"routed_queues">> := [<<"mqtt-subscription-trace_subscriberqos0">>]},
                  rabbit_misc:amqp_table(PublishHeaders)),
 
     {#'basic.get_ok'{routing_key = <<"deliver.mqtt-subscription-trace_subscriberqos0">>},
      #amqp_msg{props = #'P_basic'{headers = DeliverHeaders},
                payload = Payload}} =
-    amqp_channel:call(Ch, #'basic.get'{queue = TraceQ, no_ack = false}),
+    amqp_channel:call(Ch, #'basic.get'{queue = TraceQ}),
     ?assertMatch(#{<<"exchange_name">> := <<"amq.topic">>,
                    <<"routing_keys">> := [Topic],
                    <<"connection">> := <<"127.0.0.1:", _/binary>>,
@@ -1478,8 +1536,7 @@ trace(Config) ->
                    <<"vhost">> := <<"/">>,
                    <<"channel">> := 0,
                    <<"user">> := <<"guest">>,
-                   <<"properties">> := #{<<"delivery_mode">> := 2,
-                                         <<"headers">> := #{<<"x-mqtt-publish-qos">> := 1}},
+                   <<"properties">> := #{<<"delivery_mode">> := 2},
                    <<"redelivered">> := 0},
                  rabbit_misc:amqp_table(DeliverHeaders)),
 
@@ -1487,10 +1544,39 @@ trace(Config) ->
     {ok, _} = emqtt:publish(Pub, Topic, Payload, qos1),
     ok = expect_publishes(Sub, Topic, [Payload]),
     ?assertMatch(#'basic.get_empty'{},
-                 amqp_channel:call(Ch, #'basic.get'{queue = TraceQ, no_ack = false})),
+                 amqp_channel:call(Ch, #'basic.get'{queue = TraceQ})),
 
     delete_queue(Ch, TraceQ),
     [ok = emqtt:disconnect(C) || C <- [Pub, Sub]].
+
+trace_large_message(Config) ->
+    TraceQ = <<"trace-queue">>,
+    Ch = rabbit_ct_client_helpers:open_channel(Config),
+    declare_queue(Ch, TraceQ, []),
+    #'queue.bind_ok'{} = amqp_channel:call(
+                           Ch, #'queue.bind'{queue = TraceQ,
+                                             exchange = <<"amq.rabbitmq.trace">>,
+                                             routing_key = <<"deliver.*">>}),
+    C = connect(<<"my-client">>, Config),
+    {ok, _} = rabbit_ct_broker_helpers:rabbitmqctl(Config, 0, ["trace_on"]),
+    {ok, _, [0]} = emqtt:subscribe(C, <<"/my/topic">>),
+    Payload0 = binary:copy(<<"x">>, 1_000_000),
+    Payload = <<Payload0/binary, "y">>,
+    amqp_channel:call(Ch,
+                      #'basic.publish'{exchange = <<"amq.topic">>,
+                                       routing_key = <<".my.topic">>},
+                      #amqp_msg{payload = Payload}),
+    ok = expect_publishes(C, <<"/my/topic">>, [Payload]),
+    timer:sleep(10),
+    ?assertMatch(
+       {#'basic.get_ok'{routing_key = <<"deliver.mqtt-subscription-my-clientqos0">>},
+        #amqp_msg{payload = Payload}},
+       amqp_channel:call(Ch, #'basic.get'{queue = TraceQ})
+      ),
+
+    {ok, _} = rabbit_ct_broker_helpers:rabbitmqctl(Config, 0, ["trace_off"]),
+    delete_queue(Ch, TraceQ),
+    ok = emqtt:disconnect(C).
 
 max_packet_size_unauthenticated(Config) ->
     ClientId = ?FUNCTION_NAME,

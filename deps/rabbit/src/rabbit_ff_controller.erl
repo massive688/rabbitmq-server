@@ -48,7 +48,8 @@
          all_nodes/0,
          running_nodes/0,
          collect_inventory_on_nodes/1, collect_inventory_on_nodes/2,
-         mark_as_enabled_on_nodes/4]).
+         mark_as_enabled_on_nodes/4,
+         wait_for_task_and_stop/0]).
 
 %% gen_statem callbacks.
 -export([callback_mode/0,
@@ -76,6 +77,9 @@ start() ->
 
 start_link() ->
     gen_statem:start_link({local, ?LOCAL_NAME}, ?MODULE, none, []).
+
+wait_for_task_and_stop() ->
+    gen_statem:stop(?LOCAL_NAME).
 
 is_supported(FeatureNames) ->
     is_supported(FeatureNames, ?TIMEOUT).
@@ -283,7 +287,31 @@ proceed_with_task(refresh_after_app_load) ->
     refresh_after_app_load_task().
 
 terminate(_Reason, _State, _Data) ->
+    %% We block until a possible in-flight operation finishes. This increases
+    %% the chance that an in-flight `enable' operation finishes and records the
+    %% new feature flag state on this node before the `rabbit' application
+    %% stops or this Erlang node exits.
+    wait_for_in_flight_operations(),
     ok.
+
+wait_for_in_flight_operations() ->
+    case register_globally() of
+        yes ->
+            %% We don't unregister so the controller holds the lock until it
+            %% exits.
+            ?LOG_DEBUG(
+               "Feature flags: controller exiting, no in-flight operations",
+               #{domain => ?RMQLOG_DOMAIN_FEAT_FLAGS}),
+            ok;
+        no ->
+            ?LOG_DEBUG(
+               "Feature flags: can't stop local controller while there is "
+               "an in-flight operation; waiting for it to finish",
+               #{domain => ?RMQLOG_DOMAIN_FEAT_FLAGS}),
+            RequestId = notify_me_when_done(),
+            _ = gen_statem:wait_response(RequestId, infinity),
+            wait_for_in_flight_operations()
+    end.
 
 code_change(_OldVsn, OldState, OldData, _Extra) ->
     {ok, OldState, OldData}.
@@ -937,15 +965,22 @@ update_feature_state_and_enable(
                     case Ret2 of
                         {ok, Inventory2} ->
                             post_enable(
-                              Inventory2, FeatureName, NodesWhereDisabled),
+                              Inventory2, FeatureName, NodesWhereDisabled,
+                              true),
                             Ret2;
                         Error ->
+                            post_enable(
+                              Inventory1, FeatureName, NodesWhereDisabled,
+                              false),
                             restore_feature_flag_state(
-                              Nodes, NodesWhereDisabled, Inventory,
+                              Nodes, NodesWhereDisabled, Inventory1,
                               FeatureName),
                             Error
                     end;
                 Error ->
+                    post_enable(
+                      Inventory, FeatureName, NodesWhereDisabled,
+                      false),
                     restore_feature_flag_state(
                       Nodes, NodesWhereDisabled, Inventory, FeatureName),
                     Error
@@ -964,7 +999,8 @@ restore_feature_flag_state(
        "it:~n"
        "  enabled on:  ~0p~n"
        "  disabled on: ~0p",
-       [FeatureName, NodesWhereEnabled, NodesWhereDisabled]),
+       [FeatureName, NodesWhereEnabled, NodesWhereDisabled],
+       #{domain => ?RMQLOG_DOMAIN_FEAT_FLAGS}),
     _ = mark_as_enabled_on_nodes(
           NodesWhereEnabled, Inventory, FeatureName, true),
     _ = mark_as_enabled_on_nodes(
@@ -996,16 +1032,28 @@ do_enable(#{states_per_node := _} = Inventory, FeatureName, Nodes) ->
             Error
     end.
 
--spec post_enable(Inventory, FeatureName, Nodes) -> Ret when
+-spec post_enable(Inventory, FeatureName, Nodes, Enabled) -> Ret when
       Inventory :: rabbit_feature_flags:cluster_inventory(),
       FeatureName :: rabbit_feature_flags:feature_name(),
       Nodes :: [node()],
+      Enabled :: boolean(),
       Ret :: ok.
 
-post_enable(#{states_per_node := _}, FeatureName, Nodes) ->
+post_enable(#{states_per_node := _}, FeatureName, Nodes, Enabled) ->
     case rabbit_feature_flags:uses_callbacks(FeatureName) of
         true ->
-            _ = run_callback(Nodes, FeatureName, post_enable, #{}, infinity),
+            ?LOG_DEBUG(
+               "Feature flags: `~ts`: run `post_enable` callback (if any) "
+               "to ~ts",
+               [FeatureName,
+                case Enabled of
+                    true  -> "perform any cleanups";
+                    false -> "rollback any changes"
+                end],
+               #{domain => ?RMQLOG_DOMAIN_FEAT_FLAGS}),
+            _ = run_callback(
+                  Nodes, FeatureName, post_enable, #{enabled => Enabled},
+                  infinity),
             ok;
         false ->
             ok
@@ -1312,7 +1360,7 @@ rpc_call(Node, Module, Function, Args, Timeout) ->
         %% time, for instance, if there is a lot of data to migrate.
         error:{erpc, noconnection} = Reason
           when is_integer(Timeout) andalso Timeout > SleepBetweenRetries ->
-            ?LOG_ERROR(
+            ?LOG_WARNING(
                "Feature flags: no connection to node `~ts`; "
                "retrying in ~b milliseconds",
                [Node, SleepBetweenRetries],

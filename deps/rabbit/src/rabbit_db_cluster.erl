@@ -111,12 +111,7 @@ join_using_mnesia(ClusterNodes, NodeType) when is_list(ClusterNodes) ->
 forget_member(Node, RemoveWhenOffline) ->
     case rabbit:is_running(Node) of
         false ->
-            rabbit_db:run(
-              #{mnesia => fun() ->
-                                  forget_member_using_mnesia(
-                                    Node, RemoveWhenOffline)
-                          end
-               });
+            forget_member_using_mnesia(Node, RemoveWhenOffline);
         true ->
             {error, {failed_to_remove_node, Node, rabbit_still_running}}
     end.
@@ -135,8 +130,7 @@ forget_member_using_mnesia(Node, RemoveWhenOffline) ->
 %% Node types may not all be valid with all databases.
 
 change_node_type(NodeType) ->
-    rabbit_db:run(
-      #{mnesia => fun() -> change_node_type_using_mnesia(NodeType) end}).
+    change_node_type_using_mnesia(NodeType).
 
 change_node_type_using_mnesia(NodeType) ->
     rabbit_mnesia:change_cluster_node_type(NodeType).
@@ -150,8 +144,7 @@ change_node_type_using_mnesia(NodeType) ->
 %% @doc Indicates if this node is clustered with other nodes or not.
 
 is_clustered() ->
-    rabbit_db:run(
-      #{mnesia => fun is_clustered_using_mnesia/0}).
+    is_clustered_using_mnesia().
 
 is_clustered_using_mnesia() ->
     rabbit_mnesia:is_clustered().
@@ -161,37 +154,17 @@ is_clustered_using_mnesia() ->
 %% @doc Returns the list of cluster members.
 
 members() ->
-    rabbit_db:run(
-      #{mnesia => fun members_using_mnesia/0}).
+    members_using_mnesia().
 
 members_using_mnesia() ->
-    case rabbit_mnesia:is_running() andalso rabbit_table:is_present() of
-        true ->
-            %% If Mnesia is running locally and some tables exist, we can know
-            %% the database was initialized and we can query the list of
-            %% members.
-            mnesia:system_info(db_nodes);
-        false ->
-            try
-                %% When Mnesia is not running, we fall back to reading the
-                %% cluster status files stored on disk, if they exist.
-                {Members, _, _} = rabbit_node_monitor:read_cluster_status(),
-                Members
-            catch
-                throw:{error, _Reason}:_Stacktrace ->
-                    %% If we couldn't read those files, we consider that only
-                    %% this node is part of the "cluster".
-                    [node()]
-            end
-    end.
+    rabbit_mnesia:members().
 
 -spec disc_members() -> Members when
       Members :: [node()].
 %% @private
 
 disc_members() ->
-    rabbit_db:run(
-      #{mnesia => fun disc_members_using_mnesia/0}).
+    disc_members_using_mnesia().
 
 disc_members_using_mnesia() ->
     rabbit_mnesia:cluster_nodes(disc).
@@ -203,8 +176,7 @@ disc_members_using_mnesia() ->
 %% Node types may not all be relevant with all databases.
 
 node_type() ->
-    rabbit_db:run(
-      #{mnesia => fun node_type_using_mnesia/0}).
+    node_type_using_mnesia().
 
 node_type_using_mnesia() ->
     rabbit_mnesia:node_type().
@@ -218,9 +190,7 @@ node_type_using_mnesia() ->
 check_compatibility(RemoteNode) ->
     case rabbit_feature_flags:check_node_compatibility(RemoteNode) of
         ok ->
-            rabbit_db:run(
-              #{mnesia =>
-                fun() -> check_compatibility_using_mnesia(RemoteNode) end});
+            check_compatibility_using_mnesia(RemoteNode);
         Error ->
             Error
     end.
@@ -232,8 +202,7 @@ check_compatibility_using_mnesia(RemoteNode) ->
 %% @doc Ensures the cluster is consistent.
 
 check_consistency() ->
-    rabbit_db:run(
-      #{mnesia => fun check_consistency_using_mnesia/0}).
+    check_consistency_using_mnesia().
 
 check_consistency_using_mnesia() ->
     rabbit_mnesia:check_cluster_consistency().
@@ -246,8 +215,7 @@ check_consistency_using_mnesia() ->
 %% command.
 
 cli_cluster_status() ->
-    rabbit_db:run(
-      #{mnesia => fun cli_cluster_status_using_mnesia/0}).
+    cli_cluster_status_using_mnesia().
 
 cli_cluster_status_using_mnesia() ->
     rabbit_mnesia:status().

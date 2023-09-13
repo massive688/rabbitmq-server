@@ -31,7 +31,7 @@ bazel_dep(
 
 bazel_dep(
     name = "rules_erlang",
-    version = "3.11.3",
+    version = "3.11.4",
 )
 
 bazel_dep(
@@ -39,6 +39,18 @@ bazel_dep(
     version = "0.2.1",
     dev_dependency = True,
     repo_name = "looking_glass",
+)
+
+bazel_dep(
+    name = "rabbitmq_osiris",
+    version = "1.6.4",
+    repo_name = "osiris",
+)
+
+bazel_dep(
+    name = "rabbitmq_ra",
+    version = "2.6.3",
+    repo_name = "ra",
 )
 
 erlang_config = use_extension(
@@ -72,8 +84,8 @@ erlang_config.internal_erlang_from_github_release(
 
 erlang_config.internal_erlang_from_github_release(
     name = "25_3",
-    sha256 = "1f899b4b1ef8569c08713b76bc54607a09503a1d188e6d61512036188cc356db",
-    version = "25.3.2.5",
+    sha256 = "14f519bb63f9cc8d1db62ef7c58abc56fa94f8f76d918d23acad374f38434088",
+    version = "25.3.2.6",
 )
 
 erlang_config.internal_erlang_from_github_release(
@@ -172,6 +184,9 @@ erlang_package.hex_package(
 erlang_package.hex_package(
     name = "cowboy",
     build_file = "@rabbitmq-server//bazel:BUILD.cowboy",
+    patch_cmds = [
+        "rm ebin/cowboy.app",
+    ],
     sha256 = "3afdccb7183cc6f143cb14d3cf51fa00e53db9ec80cdcd525482f5e99bc41d6b",
     version = "2.10.0",
 )
@@ -179,6 +194,9 @@ erlang_package.hex_package(
 erlang_package.hex_package(
     name = "cowlib",
     build_file = "@rabbitmq-server//bazel:BUILD.cowlib",
+    patch_cmds = [
+        "rm ebin/cowlib.app",
+    ],
     sha256 = "163b73f6367a7341b33c794c4e88e7dbfe6498ac42dcd69ef44c5bc5507c8db0",
     version = "2.12.1",
 )
@@ -267,12 +285,6 @@ erlang_package.hex_package(
     version = "1.7.3",
 )
 
-erlang_package.git_package(
-    build_file = "@rabbitmq-server//bazel:BUILD.osiris",
-    repository = "rabbitmq/osiris",
-    tag = "v1.6.0",
-)
-
 erlang_package.hex_package(
     name = "prometheus",
     build_file = "@rabbitmq-server//bazel:BUILD.prometheus",
@@ -288,15 +300,11 @@ erlang_package.hex_package(
 )
 
 erlang_package.hex_package(
-    name = "ra",
-    build_file = "@rabbitmq-server//bazel:BUILD.ra",
-    sha256 = "1cc3101c8f7382dc73bb3fc9f044c16261306f5cbba3d79a5a6f5176695f7a18",
-    version = "2.6.3",
-)
-
-erlang_package.hex_package(
     name = "ranch",
     build_file = "@rabbitmq-server//bazel:BUILD.ranch",
+    patch_cmds = [
+        "rm ebin/ranch.app",
+    ],
     sha256 = "244ee3fa2a6175270d8e1fc59024fd9dbc76294a321057de8f803b1479e76916",
     version = "2.1.0",
 )
@@ -366,9 +374,7 @@ use_repo(
     "jose",
     "json",
     "observer_cli",
-    "osiris",
     "prometheus",
-    "ra",
     "ranch",
     "recon",
     "redbug",

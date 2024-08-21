@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2024 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_web_mqtt_handler).
@@ -23,6 +23,7 @@
 ]).
 
 -export([conserve_resources/3]).
+-export([info/2]).
 
 %% cowboy_sub_protocol
 -export([upgrade/4,
@@ -40,8 +41,7 @@
           conserve = false :: boolean(),
           stats_timer :: option(rabbit_event:state()),
           keepalive = rabbit_mqtt_keepalive:init() :: rabbit_mqtt_keepalive:state(),
-          conn_name :: option(binary()),
-          should_use_fhc :: rabbit_types:option(boolean())
+          conn_name :: option(binary())
         }).
 
 -type state() :: #state{}.
@@ -75,37 +75,38 @@ init(Req, Opts) ->
         undefined ->
             no_supported_sub_protocol(undefined, Req);
         Protocol ->
-            WsOpts0 = proplists:get_value(ws_opts, Opts, #{}),
-            WsOpts  = maps:merge(#{compress => true}, WsOpts0),
             case lists:member(<<"mqtt">>, Protocol) of
                 false ->
                     no_supported_sub_protocol(Protocol, Req);
                 true ->
-                    ShouldUseFHC = application:get_env(?APP, use_file_handle_cache, true),
-                    case ShouldUseFHC of
-                      true  -> ?LOG_INFO("Web MQTT: file handle cache use is enabled");
-                      false -> ?LOG_INFO("Web MQTT: file handle cache use is disabled")
-                    end,
+                    WsOpts0 = proplists:get_value(ws_opts, Opts, #{}),
+                    WsOpts  = maps:merge(#{compress => true}, WsOpts0),
 
                     {?MODULE,
                      cowboy_req:set_resp_header(<<"sec-websocket-protocol">>, <<"mqtt">>, Req),
-                     #state{socket = maps:get(proxy_header, Req, undefined), should_use_fhc = ShouldUseFHC},
+                     #state{socket = maps:get(proxy_header, Req, undefined)},
                      WsOpts}
             end
     end.
 
+%% We cannot use a gen_server call, because the handler process is a
+%% special cowboy_websocket process (not a gen_server) which assumes
+%% all gen_server calls are supervisor calls, and does not pass on the
+%% request to this callback module. (see cowboy_websocket:loop/3 and
+%% cowboy_children:handle_supervisor_call/4) However using a generic
+%% gen:call with a special label ?MODULE works fine.
+-spec info(pid(), rabbit_types:info_keys()) ->
+    rabbit_types:infos().
+info(Pid, all) ->
+    info(Pid, ?INFO_ITEMS);
+info(Pid, Items) ->
+    {ok, Res} = gen:call(Pid, ?MODULE, {info, Items}),
+    Res.
 -spec websocket_init(state()) ->
     {cowboy_websocket:commands(), state()} |
     {cowboy_websocket:commands(), state(), hibernate}.
-websocket_init(State0 = #state{socket = Sock, should_use_fhc = ShouldUseFHC}) ->
+websocket_init(State0 = #state{socket = Sock}) ->
     logger:set_process_metadata(#{domain => ?RMQLOG_DOMAIN_CONN ++ [web_mqtt]}),
-    case ShouldUseFHC of
-      true  ->
-        ok = file_handle_cache:obtain();
-      false -> ok;
-      undefined ->
-        ok = file_handle_cache:obtain()
-    end,
     case rabbit_net:connection_string(Sock, inbound) of
         {ok, ConnStr} ->
             ConnName = rabbit_data_coercion:to_binary(ConnStr),
@@ -167,10 +168,6 @@ websocket_info({'$gen_cast', QueueEvent = {queue_event, _, _}},
                        [State#state.conn_name, Reason]),
             stop(State#state{proc_state = PState})
     end;
-websocket_info({'$gen_cast', duplicate_id}, State) ->
-    %% Delete this backward compatibility clause when feature flag
-    %% delete_ra_cluster_mqtt_node becomes required.
-    websocket_info({'$gen_cast', {duplicate_id, true}}, State);
 websocket_info({'$gen_cast', {duplicate_id, SendWill}},
                State = #state{proc_state = ProcState,
                               conn_name = ConnName}) ->
@@ -179,8 +176,9 @@ websocket_info({'$gen_cast', {duplicate_id, SendWill}},
     rabbit_mqtt_processor:send_disconnect(?RC_SESSION_TAKEN_OVER, ProcState),
     defer_close(?CLOSE_NORMAL, SendWill),
     {[], State};
-websocket_info({'$gen_cast', {close_connection, Reason}}, State = #state{proc_state = ProcState,
-                                                                         conn_name = ConnName}) ->
+websocket_info({'$gen_cast', {close_connection, Reason}},
+               State = #state{proc_state = ProcState,
+                              conn_name = ConnName}) ->
     ?LOG_WARNING("Web MQTT disconnecting client with ID '~s' (~p), reason: ~s",
                  [rabbit_mqtt_processor:info(client_id, ProcState), ConnName, Reason]),
     case Reason of
@@ -218,12 +216,16 @@ websocket_info({keepalive, Req}, State = #state{proc_state = ProcState,
                        [ConnName, Reason]),
             stop(State)
     end;
+websocket_info(credential_expired,
+               State = #state{proc_state = ProcState,
+                              conn_name = ConnName}) ->
+    ?LOG_WARNING("Web MQTT disconnecting client with ID '~s' (~p) because credential expired",
+                 [rabbit_mqtt_processor:info(client_id, ProcState), ConnName]),
+    rabbit_mqtt_processor:send_disconnect(?RC_MAXIMUM_CONNECT_TIME, ProcState),
+    defer_close(?CLOSE_NORMAL),
+    {[], State};
 websocket_info(emit_stats, State) ->
     {[], emit_stats(State), hibernate};
-websocket_info({ra_event, _From, Evt},
-               #state{proc_state = PState0} = State) ->
-    PState = rabbit_mqtt_processor:handle_ra_event(Evt, PState0),
-    {[], State#state{proc_state = PState}, hibernate};
 websocket_info({{'DOWN', _QName}, _MRef, process, _Pid, _Reason} = Evt,
                State = #state{proc_state = PState0}) ->
     case rabbit_mqtt_processor:handle_down(Evt, PState0) of
@@ -244,6 +246,10 @@ websocket_info(connection_created, State) ->
     rabbit_core_metrics:connection_created(self(), Infos),
     rabbit_event:notify(connection_created, Infos),
     {[], State, hibernate};
+websocket_info({?MODULE, From, {info, Items}}, State) ->
+    Infos = infos(Items, State),
+    gen:reply(From, Infos),
+    {[], State, hibernate};
 websocket_info(Msg, State) ->
     ?LOG_WARNING("Web MQTT: unexpected message ~tp", [Msg]),
     {[], State, hibernate}.
@@ -253,18 +259,10 @@ terminate(Reason, Request, #state{} = State) ->
 terminate(_Reason, _Request,
           {SendWill, #state{conn_name = ConnName,
                             proc_state = PState,
-                            keepalive = KState,
-                            should_use_fhc = ShouldUseFHC} = State}) ->
+                            keepalive = KState} = State}) ->
     ?LOG_INFO("Web MQTT closing connection ~ts", [ConnName]),
     maybe_emit_stats(State),
     _ = rabbit_mqtt_keepalive:cancel_timer(KState),
-    case ShouldUseFHC of
-      true  ->
-        ok = file_handle_cache:release();
-      false -> ok;
-      undefined ->
-        ok = file_handle_cache:release()
-    end,
     case PState of
         connect_packet_unprocessed ->
             ok;
@@ -278,7 +276,9 @@ terminate(_Reason, _Request,
 no_supported_sub_protocol(Protocol, Req) ->
     %% The client MUST include “mqtt” in the list of WebSocket Sub Protocols it offers [MQTT-6.0.0-3].
     ?LOG_ERROR("Web MQTT: 'mqtt' not included in client offered subprotocols: ~tp", [Protocol]),
-    {ok, cowboy_req:reply(400, #{<<"connection">> => <<"close">>}, Req), #state{}}.
+    {ok,
+     cowboy_req:reply(400, #{<<"connection">> => <<"close">>}, Req),
+     #state{}}.
 
 handle_data(Data, State0 = #state{}) ->
     case handle_data1(Data, State0) of

@@ -2,13 +2,14 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2024 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 
 %% This module exists since 3.12 replacing plugins rabbitmq-message-timestamp
 %% and rabbitmq-routing-node-stamp. Instead of using these plugins, RabbitMQ core can
 %% now be configured to add such headers. This enables non-AMQP 0.9.1 protocols (that
 %% do not use rabbit_channel) to also add AMQP 0.9.1 headers to incoming messages.
 -module(rabbit_message_interceptor).
+-include("mc.hrl").
 
 -export([intercept/1]).
 
@@ -17,7 +18,7 @@
 
 -spec intercept(mc:state()) -> mc:state().
 intercept(Msg) ->
-    Interceptors = persistent_term:get({rabbit, incoming_message_interceptors}, []),
+    Interceptors = persistent_term:get(incoming_message_interceptors, []),
     lists:foldl(fun({InterceptorName, Overwrite}, M) ->
                         intercept(M, InterceptorName, Overwrite)
                 end, Msg, Interceptors).
@@ -26,9 +27,9 @@ intercept(Msg, set_header_routing_node, Overwrite) ->
     Node = atom_to_binary(node()),
     set_annotation(Msg, ?HEADER_ROUTING_NODE, Node, Overwrite);
 intercept(Msg0, set_header_timestamp, Overwrite) ->
-    Millis = os:system_time(millisecond),
-    Msg = set_annotation(Msg0, ?HEADER_TIMESTAMP, Millis, Overwrite),
-    set_timestamp(Msg, Millis, Overwrite).
+    Ts = mc:get_annotation(?ANN_RECEIVED_AT_TIMESTAMP, Msg0),
+    Msg = set_annotation(Msg0, ?HEADER_TIMESTAMP, Ts, Overwrite),
+    set_timestamp(Msg, Ts, Overwrite).
 
 -spec set_annotation(mc:state(), mc:ann_key(), mc:ann_value(), boolean()) -> mc:state().
 set_annotation(Msg, Key, Value, Overwrite) ->
@@ -45,5 +46,5 @@ set_timestamp(Msg, Timestamp, Overwrite) ->
         {Ts, false} when is_integer(Ts) ->
             Msg;
         _ ->
-            mc:set_annotation(timestamp, Timestamp, Msg)
+            mc:set_annotation(?ANN_TIMESTAMP, Timestamp, Msg)
     end.

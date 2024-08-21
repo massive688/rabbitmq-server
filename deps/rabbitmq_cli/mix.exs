@@ -2,7 +2,7 @@
 ## License, v. 2.0. If a copy of the MPL was not distributed with this
 ## file, You can obtain one at https://mozilla.org/MPL/2.0/.
 ##
-## Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+## Copyright (c) 2007-2024 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.  All rights reserved.
 
 defmodule RabbitMQCtl.MixfileBase do
   use Mix.Project
@@ -10,11 +10,16 @@ defmodule RabbitMQCtl.MixfileBase do
   def project do
     [
       app: :rabbitmqctl,
-      version: "3.13.0-dev",
-      elixir: ">= 1.13.4 and < 1.16.0",
+      version: "4.0.0-dev",
+      elixir: ">= 1.13.4 and < 1.18.0",
       build_embedded: Mix.env() == :prod,
       start_permanent: Mix.env() == :prod,
-      escript: [main_module: RabbitMQCtl, emu_args: "-hidden", path: "escript/rabbitmqctl"],
+      escript: [
+        main_module: RabbitMQCtl,
+        emu_args: "-hidden",
+        path: "escript/rabbitmqctl"
+      ],
+      prune_code_paths: false,
       deps: deps(Mix.env()),
       aliases: aliases(),
       xref: [
@@ -38,7 +43,6 @@ defmodule RabbitMQCtl.MixfileBase do
           :rabbit_log,
           :rabbit_misc,
           :rabbit_mnesia,
-          :rabbit_mnesia_rename,
           :rabbit_nodes_common,
           :rabbit_pbe,
           :rabbit_plugins,
@@ -171,10 +175,6 @@ defmodule RabbitMQCtl.MixfileBase do
             {
               :amqp,
               path: Path.join(deps_dir, "amqp")
-            },
-            {
-              :dialyxir,
-              path: Path.join(deps_dir, "dialyxir"), runtime: false
             },
             {
               :rabbit,

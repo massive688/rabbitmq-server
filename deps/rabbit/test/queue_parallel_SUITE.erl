@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2011-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2024 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 %%
 -module(queue_parallel_SUITE).
@@ -56,7 +56,8 @@ groups() ->
                 purge,
                 purge_no_consumer,
                 basic_recover,
-                delete_immediately_by_resource
+                delete_immediately_by_resource,
+                cc_header_non_array_should_close_channel
                ],
     ExtraBccTests = [extra_bcc_option,
                      extra_bcc_option_multiple_1,
@@ -66,11 +67,7 @@ groups() ->
      {parallel_tests, [], [
        {classic_queue, GroupOptions, AllTests ++ [delete_immediately_by_pid_succeeds,
                                                   trigger_message_store_compaction]},
-       {mirrored_queue, GroupOptions, AllTests ++ [delete_immediately_by_pid_succeeds,
-                                                   trigger_message_store_compaction]},
        {quorum_queue, GroupOptions, AllTests ++ ExtraBccTests ++ [delete_immediately_by_pid_fails]},
-       {quorum_queue_in_memory_limit, GroupOptions, AllTests ++ [delete_immediately_by_pid_fails]},
-       {quorum_queue_in_memory_bytes, GroupOptions, AllTests ++ [delete_immediately_by_pid_fails]},
        {stream_queue, GroupOptions, ExtraBccTests ++ [publish, subscribe]}
       ]}
     ].
@@ -103,29 +100,6 @@ init_per_group(quorum_queue, Config) ->
       [{queue_args, [{<<"x-queue-type">>, longstr, <<"quorum">>}]},
        {consumer_args, []},
        {queue_durable, true}]);
-init_per_group(quorum_queue_in_memory_limit, Config) ->
-    rabbit_ct_helpers:set_config(
-      Config,
-      [{queue_args, [{<<"x-queue-type">>, longstr, <<"quorum">>},
-                     {<<"x-max-in-memory-length">>, long, 1}]},
-       {consumer_args, []},
-       {queue_durable, true}]);
-init_per_group(quorum_queue_in_memory_bytes, Config) ->
-    rabbit_ct_helpers:set_config(
-      Config,
-      [{queue_args, [{<<"x-queue-type">>, longstr, <<"quorum">>},
-                     {<<"x-max-in-memory-bytes">>, long, 1}]},
-       {consumer_args, []},
-       {queue_durable, true}]);
-init_per_group(mirrored_queue, Config) ->
-    rabbit_ct_broker_helpers:set_ha_policy(Config, 0, <<"^max_length.*queue">>,
-        <<"all">>, [{<<"ha-sync-mode">>, <<"automatic">>}]),
-    Config1 = rabbit_ct_helpers:set_config(
-                Config, [{is_mirrored, true},
-                         {queue_args, [{<<"x-queue-type">>, longstr, <<"classic">>}]},
-                         {consumer_args, []},
-                         {queue_durable, true}]),
-    rabbit_ct_helpers:run_steps(Config1, []);
 init_per_group(stream_queue, Config) ->
     rabbit_ct_helpers:set_config(
       Config,
@@ -136,10 +110,11 @@ init_per_group(Group, Config0) ->
     case lists:member({group, Group}, all()) of
         true ->
             ClusterSize = 3,
+            Tick = 256,
             Config = rabbit_ct_helpers:merge_app_env(
-                       Config0, {rabbit, [{channel_tick_interval, 1000},
-                                          {quorum_tick_interval, 1000},
-                                          {stream_tick_interval, 1000}]}),
+                       Config0, {rabbit, [{channel_tick_interval, Tick},
+                                          {quorum_tick_interval, Tick},
+                                          {stream_tick_interval, Tick}]}),
             Config1 = rabbit_ct_helpers:set_config(
                         Config, [ {rmq_nodename_suffix, Group},
                                   {rmq_nodes_count, ClusterSize}
@@ -669,6 +644,30 @@ delete_immediately_by_resource(Config) ->
                                               arguments = Args})),
     rabbit_ct_client_helpers:close_channel(Ch),
     ok.
+
+cc_header_non_array_should_close_channel(Config) ->
+    {C, Ch} = rabbit_ct_client_helpers:open_connection_and_channel(Config, 0),
+    Name0 = ?FUNCTION_NAME,
+    Name = atom_to_binary(Name0),
+    QName = <<"queue_cc_header_non_array", Name/binary>>,
+    delete_queue(Ch, QName),
+    declare_queue(Ch, Config, QName),
+    amqp_channel:call(Ch,
+                       #'basic.publish'{exchange = <<"">>,
+                                        routing_key = QName},
+                       #amqp_msg{
+                          props = #'P_basic'{headers = [{<<"CC">>, long, 99}]},
+                          payload = <<"foo">>}),
+
+    Ref = erlang:monitor(process, Ch),
+    receive
+        {'DOWN', Ref, process, Ch, {shutdown, {server_initiated_close, 406, _}}} ->
+            ok
+    after 5000 ->
+              exit(channel_closed_timeout)
+    end,
+
+    ok = rabbit_ct_client_helpers:close_connection(C).
 
 extra_bcc_option(Config) ->
     {_, Ch} = rabbit_ct_client_helpers:open_connection_and_channel(Config, 0),

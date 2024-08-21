@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2024 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_mgmt_wm_vhosts).
@@ -12,8 +12,6 @@
 -export([basic/0, augmented/2]).
 
 -include_lib("rabbitmq_management_agent/include/rabbit_mgmt_records.hrl").
--include_lib("rabbit_common/include/rabbit.hrl").
-
 -define(BASIC_COLUMNS, ["name", "tracing", "pid"]).
 
 -define(DEFAULT_SORT, ["name"]).
@@ -57,7 +55,7 @@ augment(Basic, ReqData) ->
 
 augmented(ReqData, #context{user = User}) ->
     case rabbit_mgmt_util:disable_stats(ReqData) of
-        false ->            
+        false ->
             rabbit_mgmt_db:augment_vhosts(
               [rabbit_vhost:info(V) || V <- rabbit_mgmt_util:list_visible_vhosts(User)],
               rabbit_mgmt_util:range(ReqData));
@@ -66,4 +64,4 @@ augmented(ReqData, #context{user = User}) ->
     end.
 
 basic() ->
-    rabbit_vhost:info_all([name]).
+    rabbit_vhost:info_all([name, description, tags, default_queue_type, metadata]).

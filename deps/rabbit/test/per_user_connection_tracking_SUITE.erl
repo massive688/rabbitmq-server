@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2011-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2024 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(per_user_connection_tracking_SUITE).
@@ -12,16 +12,14 @@
 -include_lib("amqp_client/include/amqp_client.hrl").
 -include_lib("eunit/include/eunit.hrl").
 
+-compile(nowarn_export_all).
 -compile(export_all).
 
 -define(AWAIT_TIMEOUT, 30000).
 
 all() ->
     [
-     {group, cluster_size_1_network},
-     {group, cluster_size_2_network},
-     {group, cluster_size_1_direct},
-     {group, cluster_size_2_direct}
+     {group, tests}
     ].
 
 groups() ->
@@ -33,10 +31,12 @@ groups() ->
         cluster_user_deletion_forces_connection_closure
     ],
     [
-      {cluster_size_1_network, [], ClusterSize1Tests},
-      {cluster_size_2_network, [], ClusterSize2Tests},
-      {cluster_size_1_direct, [], ClusterSize1Tests},
-      {cluster_size_2_direct, [], ClusterSize2Tests}
+     {tests, [], [
+                  {cluster_size_1_network, [], ClusterSize1Tests},
+                  {cluster_size_2_network, [], ClusterSize2Tests},
+                  {cluster_size_1_direct, [], ClusterSize1Tests},
+                  {cluster_size_2_direct, [], ClusterSize2Tests}
+                 ]}
     ].
 
 suite() ->
@@ -67,7 +67,9 @@ init_per_group(cluster_size_1_direct, Config) ->
     init_per_multinode_group(cluster_size_1_direct, Config1, 1);
 init_per_group(cluster_size_2_direct, Config) ->
     Config1 = rabbit_ct_helpers:set_config(Config, [{connection_type, direct}]),
-    init_per_multinode_group(cluster_size_2_direct, Config1, 2).
+    init_per_multinode_group(cluster_size_2_direct, Config1, 2);
+init_per_group(tests, Config) ->
+    Config.
 
 init_per_multinode_group(_Group, Config, NodeCount) ->
     Suffix = rabbit_ct_helpers:testcase_absname(Config, "", "-"),
@@ -79,6 +81,9 @@ init_per_multinode_group(_Group, Config, NodeCount) ->
                                 rabbit_ct_broker_helpers:setup_steps() ++
                                     rabbit_ct_client_helpers:setup_steps()).
 
+end_per_group(tests, Config) ->
+    % The broker is managed by {init,end}_per_testcase().
+    Config;
 end_per_group(_Group, Config) ->
     rabbit_ct_helpers:run_steps(Config,
       rabbit_ct_client_helpers:teardown_steps() ++

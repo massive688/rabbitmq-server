@@ -2,12 +2,11 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2024 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 -module(cluster_SUITE).
 -compile([export_all, nowarn_export_all]).
 
--include_lib("common_test/include/ct.hrl").
 -include_lib("eunit/include/eunit.hrl").
 -import(util, [expect_publishes/3,
                connect/3,
@@ -43,8 +42,7 @@ groups() ->
 cluster_size_5() ->
     [
      connection_id_tracking,
-     connection_id_tracking_on_nodedown,
-     connection_id_tracking_with_decommissioned_node
+     connection_id_tracking_on_nodedown
     ].
 
 %% -------------------------------------------------------------------
@@ -81,11 +79,11 @@ init_per_testcase(Testcase, Config) ->
         {rmq_nodename_suffix, Testcase},
         {rmq_nodes_clustered, true}
       ]),
-    Config2 = rabbit_ct_helpers:run_setup_steps(Config1,
-      [ fun merge_app_env/1 ] ++
+    rabbit_ct_helpers:run_setup_steps(
+      Config1,
+      [fun merge_app_env/1] ++
       setup_steps() ++
-      rabbit_ct_client_helpers:setup_steps()),
-    util:maybe_skip_v5(Config2).
+      rabbit_ct_client_helpers:setup_steps()).
 
 end_per_testcase(Testcase, Config) ->
     rabbit_ct_helpers:run_steps(Config,
@@ -141,26 +139,7 @@ connection_id_tracking_on_nodedown(Config) ->
     process_flag(trap_exit, true),
     ok = stop_node(Config, 0),
     await_exit(C),
-    ok = eventually(?_assertEqual([], util:all_connection_pids(1, Config)), 500, 4).
-
-connection_id_tracking_with_decommissioned_node(Config) ->
-    case rpc(Config, rabbit_mqtt_ff, track_client_id_in_ra, []) of
-        false ->
-            {skip, "This test requires client ID tracking in Ra"};
-        true ->
-            Server = get_node_config(Config, 0, nodename),
-            C = connect(<<"simpleClient">>, Config, ?OPTS),
-            {ok, _, _} = emqtt:subscribe(C, <<"TopicA">>, qos0),
-            ok = emqtt:publish(C, <<"TopicA">>, <<"Payload">>),
-            ok = expect_publishes(C, <<"TopicA">>, [<<"Payload">>]),
-
-            assert_connection_count(Config, 4, 1),
-            process_flag(trap_exit, true),
-            {ok, _} = rabbitmqctl(Config, 0, ["decommission_mqtt_node", Server]),
-            await_exit(C),
-            assert_connection_count(Config, 4, 0),
-            ok
-    end.
+    ok = eventually(?_assertEqual([], util:all_connection_pids(Config)), 500, 4).
 
 %%
 %% Helpers

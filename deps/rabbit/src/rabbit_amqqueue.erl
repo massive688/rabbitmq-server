@@ -2,12 +2,11 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2024 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_amqqueue).
 
--export([warn_file_limit/0]).
 -export([recover/1, stop/1, start/1, declare/6, declare/7,
          delete_immediately/1, delete_exclusive/2, delete/4, purge/1,
          forget_all_durable/1]).
@@ -25,25 +24,23 @@
          emit_info_all/5, list_local/1, info_local/1,
          emit_info_local/4, emit_info_down/4]).
 -export([count/0]).
--export([list_down/1, count/1, list_names/0, list_names/1, list_local_names/0,
+-export([list_down/1, list_down/2, list_all/1,
+         count/1, list_names/0, list_names/1, list_local_names/0,
          list_local_names_down/0]).
 -export([list_by_type/1, sample_local_queues/0, sample_n_by_name/2, sample_n/2]).
 -export([force_event_refresh/1, notify_policy_changed/1]).
 -export([consumers/1, consumers_all/1,  emit_consumers_all/4, consumer_info_keys/0]).
--export([basic_get/5, basic_consume/12, basic_cancel/5, notify_decorators/1]).
+-export([basic_get/5, basic_consume/12, notify_decorators/1]).
 -export([notify_sent/2, notify_sent_queue_down/1, resume/2]).
--export([notify_down_all/2, notify_down_all/3, activate_limit_all/2, credit/5]).
+-export([notify_down_all/2, notify_down_all/3, activate_limit_all/2]).
 -export([on_node_up/1, on_node_down/1]).
--export([update/2, store_queue/1, update_decorators/1, policy_changed/2]).
--export([update_mirroring/1, sync_mirrors/1, cancel_sync_mirrors/1]).
+-export([update/2, store_queue/1, update_decorators/2, policy_changed/2]).
 -export([emit_unresponsive/6, emit_unresponsive_local/5, is_unresponsive/2]).
--export([has_synchronised_mirrors_online/1, is_match/2, is_in_virtual_host/2]).
+-export([is_match/2, is_in_virtual_host/2]).
 -export([is_replicated/1, is_exclusive/1, is_not_exclusive/1, is_dead_exclusive/1]).
--export([list_local_quorum_queues/0, list_local_quorum_queue_names/0, list_local_stream_queues/0,
-         list_local_mirrored_classic_queues/0, list_local_mirrored_classic_names/0,
+-export([list_local_quorum_queues/0, list_local_quorum_queue_names/0,
+         list_local_stream_queues/0, list_stream_queues_on/1,
          list_local_leaders/0, list_local_followers/0, get_quorum_nodes/1,
-         list_local_mirrored_classic_without_synchronised_mirrors/0,
-         list_local_mirrored_classic_without_synchronised_mirrors_for_cli/0,
          list_local_quorum_queues_with_name_matching/1,
          list_local_quorum_queues_with_name_matching/2]).
 -export([is_local_to_node/2, is_local_to_node_set/2]).
@@ -65,7 +62,7 @@
 -export([is_server_named_allowed/1]).
 
 -export([check_max_age/1]).
--export([get_queue_type/1, get_resource_vhost_name/1, get_resource_name/1]).
+-export([get_queue_type/1, get_queue_type/2, get_resource_vhost_name/1, get_resource_name/1]).
 
 -export([deactivate_limit_all/2]).
 
@@ -73,10 +70,10 @@
 -export([queue/1, queue_names/1]).
 
 -export([kill_queue/2, kill_queue/3, kill_queue_hard/2, kill_queue_hard/3]).
+-export([delete_transient_queues_on_node/1]).
 
 %% internal
 -export([internal_declare/2, internal_delete/2, run_backing_queue/3,
-         set_ram_duration_target/2, set_maximum_since_use/2,
          emit_consumers_local/3, internal_delete/3]).
 
 -include_lib("rabbit_common/include/rabbit.hrl").
@@ -90,7 +87,7 @@
 -define(IS_QUORUM(QPid), is_tuple(QPid)).
 %%----------------------------------------------------------------------------
 
--export_type([name/0, qmsg/0, absent_reason/0]).
+-export_type([name/0, qmsg/0, msg_id/0, absent_reason/0]).
 
 -type name() :: rabbit_types:r('queue').
 
@@ -99,7 +96,7 @@
 -type qfun(A) :: fun ((amqqueue:amqqueue()) -> A | no_return()).
 -type qmsg() :: {name(), pid() | {atom(), pid()}, msg_id(),
                  boolean(), mc:state()}.
--type msg_id() :: non_neg_integer().
+-type msg_id() :: undefined | non_neg_integer() | {Priority :: non_neg_integer(), undefined | non_neg_integer()}.
 -type ok_or_errors() ::
         'ok' | {'error', [{'error' | 'exit' | 'throw', any()}]}.
 -type absent_reason() :: 'nodedown' | 'crashed' | stopped | timeout.
@@ -120,21 +117,6 @@
         [queue_name, channel_pid, consumer_tag, ack_required, prefetch_count,
          active, activity_status, arguments]).
 -define(KILL_QUEUE_DELAY_INTERVAL, 100).
-
-warn_file_limit() ->
-    DurableQueues = find_recoverable_queues(),
-    L = length(DurableQueues),
-
-    %% if there are not enough file handles, the server might hang
-    %% when trying to recover queues, warn the user:
-    case file_handle_cache:get_limit() < L of
-        true ->
-            rabbit_log:warning(
-              "Recovering ~tp queues, available file handles: ~tp. Please increase max open file handles limit to at least ~tp!",
-              [L, file_handle_cache:get_limit(), L]);
-        false ->
-            ok
-    end.
 
 -spec recover(rabbit_types:vhost()) ->
     {Recovered :: [amqqueue:amqqueue()],
@@ -185,43 +167,42 @@ find_local_durable_queues(VHostName) ->
                                                    rabbit_queue_type:is_recoverable(Q)
                                        end).
 
-find_recoverable_queues() ->
-    rabbit_db_queue:filter_all_durable(fun(Q) ->
-                                               rabbit_queue_type:is_recoverable(Q)
-                                       end).
-
 -spec declare(name(),
               boolean(),
               boolean(),
               rabbit_framing:amqp_table(),
-              rabbit_types:maybe(pid()),
+              rabbit_types:'maybe'(pid()),
               rabbit_types:username()) ->
     {'new' | 'existing' | 'owner_died', amqqueue:amqqueue()} |
     {'new', amqqueue:amqqueue(), rabbit_fifo_client:state()} |
     {'absent', amqqueue:amqqueue(), absent_reason()} |
+    {'error', Type :: atom(), Reason :: string(), Args :: term()} |
     {protocol_error, Type :: atom(), Reason :: string(), Args :: term()}.
 declare(QueueName, Durable, AutoDelete, Args, Owner, ActingUser) ->
     declare(QueueName, Durable, AutoDelete, Args, Owner, ActingUser, node()).
 
 
-%% The Node argument suggests where the queue (leader if mirrored)
-%% should be. Note that in some cases (e.g. with "nodes" policy in
-%% effect) this might not be possible to satisfy.
+%% The Node argument suggests where the queue leader replica
+%% should be placed. Note that this function does not guarantee that
+%% this suggestion will be satisfied.
 
 -spec declare(name(),
               boolean(),
               boolean(),
               rabbit_framing:amqp_table(),
-              rabbit_types:maybe(pid()),
+              rabbit_types:'maybe'(pid()),
               rabbit_types:username(),
               node() | {'ignore_location', node()}) ->
     {'new' | 'existing' | 'owner_died', amqqueue:amqqueue()} |
     {'absent', amqqueue:amqqueue(), absent_reason()} |
+    {'error', Type :: atom(), Reason :: string(), Args :: term()} |
     {protocol_error, Type :: atom(), Reason :: string(), Args :: term()}.
 declare(QueueName = #resource{virtual_host = VHost}, Durable, AutoDelete, Args,
         Owner, ActingUser, Node) ->
-    ok = check_declare_arguments(QueueName, Args),
-    Type = get_queue_type(Args),
+    %% note: this is a module name, not a shortcut such as <<"quorum">>
+    DQT = rabbit_vhost:default_queue_type(VHost, rabbit_queue_type:fallback()),
+    ok = check_declare_arguments(QueueName, Args, DQT),
+    Type = get_queue_type(Args, DQT),
     case rabbit_queue_type:is_enabled(Type) of
         true ->
             Q = amqqueue:new(QueueName,
@@ -248,24 +229,53 @@ declare(QueueName = #resource{virtual_host = VHost}, Durable, AutoDelete, Args,
              [rabbit_misc:rs(QueueName), Type, Node]}
     end.
 
+-spec get_queue_type(Args :: rabbit_framing:amqp_table()) -> rabbit_queue_type:queue_type().
+%% This version is not virtual host metadata-aware but will use
+%% the node-wide default type as well as 'rabbit_queue_type:fallback/0'.
+get_queue_type([]) ->
+    rabbit_queue_type:default();
 get_queue_type(Args) ->
+    get_queue_type(Args, rabbit_queue_type:default()).
+
+%% This version should be used together with 'rabbit_vhost:default_queue_type/{1,2}'
+get_queue_type([], DefaultQueueType) ->
+    rabbit_queue_type:discover(DefaultQueueType);
+get_queue_type(Args, DefaultQueueType) ->
     case rabbit_misc:table_lookup(Args, <<"x-queue-type">>) of
         undefined ->
-            rabbit_queue_type:default();
+            rabbit_queue_type:discover(DefaultQueueType);
+        {longstr, undefined} ->
+            rabbit_queue_type:discover(DefaultQueueType);
+        {longstr, <<"undefined">>} ->
+            rabbit_queue_type:discover(DefaultQueueType);
         {_, V} ->
             rabbit_queue_type:discover(V)
     end.
 
--spec internal_declare(amqqueue:amqqueue(), boolean()) ->
-    {created | existing, amqqueue:amqqueue()} | queue_absent().
+-spec internal_declare(Queue, Recover) -> Ret when
+      Queue :: amqqueue:amqqueue(),
+      Recover :: boolean(),
+      Ret :: {created | existing, amqqueue:amqqueue()} |
+             queue_absent() |
+             rabbit_khepri:timeout_error().
 
 internal_declare(Q, Recover) ->
     do_internal_declare(Q, Recover).
 
 do_internal_declare(Q0, true) ->
     Q = amqqueue:set_state(Q0, live),
-    ok = store_queue(Q),
-    {created, Q0};
+    case store_queue(Q) of
+        ok ->
+            %% TODO Why do we return the old state instead of the actual one?
+            %% I'm leaving it like it was before the khepri refactor, because
+            %% rabbit_amqqueue_process:init_it2 compares the result of this
+            %% declare to decide if continue or stop. If we return the actual
+            %% one, it fails and the queue stops silently during init.
+            %% Maybe we should review this bit of code at some point.
+            {created, Q0};
+        {error, timeout} = Err ->
+            Err
+    end;
 do_internal_declare(Q0, false) ->
     Q = rabbit_policy:set(amqqueue:set_state(Q0, live)),
     Queue = rabbit_queue_decorator:set(Q),
@@ -278,21 +288,28 @@ do_internal_declare(Q0, false) ->
 update(Name, Fun) ->
     rabbit_db_queue:update(Name, Fun).
 
-%% only really used for quorum queues to ensure the rabbit_queue record
+-spec ensure_rabbit_queue_record_is_initialized(Queue) -> Ret when
+      Queue :: amqqueue:amqqueue(),
+      Ret :: ok | {error, timeout}.
+
+%% only really used for stream queues to ensure the rabbit_queue record
 %% is initialised
 ensure_rabbit_queue_record_is_initialized(Q) ->
     store_queue(Q).
 
--spec store_queue(amqqueue:amqqueue()) -> 'ok'.
+-spec store_queue(Queue) -> Ret when
+      Queue :: amqqueue:amqqueue(),
+      Ret :: ok | {error, timeout}.
 
 store_queue(Q0) ->
     Q = rabbit_queue_decorator:set(Q0),
     rabbit_db_queue:set(Q).
 
--spec update_decorators(name()) -> 'ok'.
+-spec update_decorators(name(), [Decorator]) -> 'ok' when
+      Decorator :: atom().
 
-update_decorators(Name) ->
-    rabbit_db_queue:update_decorators(Name).
+update_decorators(Name, Decorators) ->
+    rabbit_db_queue:update_decorators(Name, Decorators).
 
 -spec policy_changed(amqqueue:amqqueue(), amqqueue:amqqueue()) ->
           'ok'.
@@ -300,7 +317,6 @@ update_decorators(Name) ->
 policy_changed(Q1, Q2) ->
     Decorators1 = amqqueue:get_decorators(Q1),
     Decorators2 = amqqueue:get_decorators(Q2),
-    rabbit_mirror_queue_misc:update_mirrors(Q1, Q2),
     D1 = rabbit_queue_decorator:select(Decorators1),
     D2 = rabbit_queue_decorator:select(Decorators2),
     [ok = M:policy_changed(Q1, Q2) || M <- lists:usort(D1 ++ D2)],
@@ -323,12 +339,10 @@ is_server_named_allowed(Args) ->
     Type = get_queue_type(Args),
     rabbit_queue_type:is_server_named_allowed(Type).
 
--spec lookup
-        (name()) ->
-            rabbit_types:ok(amqqueue:amqqueue()) |
-            rabbit_types:error('not_found');
-        ([name()]) ->
-            [amqqueue:amqqueue()].
+-spec lookup(QueueName) -> Ret when
+      QueueName :: name(),
+      Ret :: rabbit_types:ok(amqqueue:amqqueue())
+             | rabbit_types:error('not_found').
 
 lookup(Name) when is_record(Name, resource) ->
     rabbit_db_queue:get(Name).
@@ -384,7 +398,7 @@ get_rebalance_lock(Pid) when is_pid(Pid) ->
             false
     end.
 
--spec rebalance('all' | 'quorum' | 'classic', binary(), binary()) ->
+-spec rebalance('all' | 'quorum', binary(), binary()) ->
                        {ok, [{node(), pos_integer()}]} | {error, term()}.
 rebalance(Type, VhostSpec, QueueSpec) ->
     %% We have not yet acquired the rebalance_queues global lock.
@@ -395,7 +409,7 @@ maybe_rebalance({true, Id}, Type, VhostSpec, QueueSpec) ->
                     [Type, VhostSpec, QueueSpec]),
     Running = rabbit_maintenance:filter_out_drained_nodes_consistent_read(rabbit_nodes:list_running()),
     NumRunning = length(Running),
-    ToRebalance = [Q || Q <- rabbit_amqqueue:list(),
+    ToRebalance = [Q || Q <- list(),
                         filter_per_type(Type, Q),
                         is_replicated(Q),
                         is_match(amqqueue:get_vhost(Q), VhostSpec) andalso
@@ -417,7 +431,7 @@ maybe_rebalance(false, _Type, _VhostSpec, _QueueSpec) ->
 
 %% Stream queues don't yet support rebalance
 filter_per_type(all, Q)  ->
-    ?amqqueue_is_quorum(Q) or ?amqqueue_is_classic(Q) or ?amqqueue_is_stream(Q);
+    ?amqqueue_is_quorum(Q) or ?amqqueue_is_stream(Q);
 filter_per_type(quorum, Q) ->
     ?amqqueue_is_quorum(Q);
 filter_per_type(stream, Q) ->
@@ -428,9 +442,7 @@ filter_per_type(classic, Q) ->
 rebalance_module(Q) when ?amqqueue_is_quorum(Q) ->
     rabbit_quorum_queue;
 rebalance_module(Q) when ?amqqueue_is_stream(Q) ->
-    rabbit_stream_queue;
-rebalance_module(Q) when ?amqqueue_is_classic(Q) ->
-    rabbit_mirror_queue_misc.
+    rabbit_stream_queue.
 
 get_resource_name(#resource{name = Name}) ->
     Name.
@@ -541,23 +553,15 @@ with(#resource{} = Name, F, E, RetriesLeft) ->
             %% Something bad happened to that queue, we are bailing out
             %% on processing current request.
             E({absent, Q, timeout});
-        {ok, Q} when ?amqqueue_state_is(Q, stopped) andalso RetriesLeft =:= 0 ->
-            %% The queue was stopped and not migrated
+        {ok, Q} when ?amqqueue_state_is(Q, stopped) ->
+            %% The queue was stopped
             E({absent, Q, stopped});
         %% The queue process has crashed with unknown error
         {ok, Q} when ?amqqueue_state_is(Q, crashed) ->
             E({absent, Q, crashed});
-        %% The queue process has been stopped by a supervisor.
-        %% In that case a synchronised mirror can take over
-        %% so we should retry.
-        {ok, Q} when ?amqqueue_state_is(Q, stopped) ->
-            %% The queue process was stopped by the supervisor
-            rabbit_misc:with_exit_handler(
-              fun () -> retry_wait(Q, F, E, RetriesLeft) end,
-              fun () -> F(Q) end);
         %% The queue is supposed to be active.
-        %% The leader node can go away or queue can be killed
-        %% so we retry, waiting for a mirror to take over.
+        %% The node can go away or queue can be killed so we retry.
+        %% TODO review this: why to retry when mirroring is gone?
         {ok, Q} when ?amqqueue_state_is(Q, live) ->
             %% We check is_process_alive(QPid) in case we receive a
             %% nodedown (for example) in F() that has nothing to do
@@ -581,27 +585,19 @@ with(#resource{} = Name, F, E, RetriesLeft) ->
 retry_wait(Q, F, E, RetriesLeft) ->
     Name = amqqueue:get_name(Q),
     QPid = amqqueue:get_pid(Q),
-    QState = amqqueue:get_state(Q),
-    case {QState, is_replicated(Q)} of
-        %% We don't want to repeat an operation if
-        %% there are no mirrors to migrate to
-        {stopped, false} ->
-            E({absent, Q, stopped});
-        _ ->
-            case rabbit_process:is_process_alive(QPid) of
-                true ->
-                    % rabbitmq-server#1682
-                    % The old check would have crashed here,
-                    % instead, log it and run the exit fun. absent & alive is weird,
-                    % but better than crashing with badmatch,true
-                    rabbit_log:debug("Unexpected alive queue process ~tp", [QPid]),
-                    E({absent, Q, alive});
-                false ->
-                    ok % Expected result
-            end,
-            timer:sleep(30),
-            with(Name, F, E, RetriesLeft - 1)
-    end.
+    case rabbit_process:is_process_alive(QPid) of
+        true ->
+            %% rabbitmq-server#1682
+            %% The old check would have crashed here,
+            %% instead, log it and run the exit fun. absent & alive is weird,
+            %% but better than crashing with badmatch,true
+            rabbit_log:debug("Unexpected alive queue process ~tp", [QPid]),
+            E({absent, Q, alive});
+        false ->
+            ok % Expected result
+    end,
+    timer:sleep(30),
+    with(Name, F, E, RetriesLeft - 1).
 
 -spec with(name(), qfun(A)) ->
           A | rabbit_types:error(not_found_or_absent()).
@@ -670,7 +666,7 @@ priv_absent(QueueName, QPid, _IsDurable, alive) ->
 
 -spec assert_equivalence
         (amqqueue:amqqueue(), boolean(), boolean(),
-         rabbit_framing:amqp_table(), rabbit_types:maybe(pid())) ->
+         rabbit_framing:amqp_table(), rabbit_types:'maybe'(pid())) ->
             'ok' | rabbit_types:channel_exit() | rabbit_types:connection_exit().
 
 assert_equivalence(Q, DurableDeclare, AutoDeleteDeclare, Args1, Owner) ->
@@ -745,7 +741,7 @@ augment_declare_args(VHost, Durable, Exclusive, AutoDelete, Args0) ->
             case IsPermitted andalso IsCompatible of
                 true ->
                     %% patch up declare arguments with x-queue-type if there
-                    %% is a vhost default set the queue is druable and not exclusive
+                    %% is a vhost default set the queue is durable and not exclusive
                     %% and there is no queue type argument
                     %% present
                     rabbit_misc:set_table_value(Args0,
@@ -753,7 +749,12 @@ augment_declare_args(VHost, Durable, Exclusive, AutoDelete, Args0) ->
                                                 longstr,
                                                 DefaultQueueType);
                 false ->
-                    Args0
+                    %% if the properties are incompatible with the declared
+                    %% DQT, use the fall back type
+                    rabbit_misc:set_table_value(Args0,
+                                                <<"x-queue-type">>,
+                                                longstr,
+                                                rabbit_queue_type:short_alias_of(rabbit_queue_type:fallback()))
             end;
         _ ->
             Args0
@@ -780,11 +781,13 @@ check_exclusive_access(Q, _ReaderPid, _MatchType) ->
       [rabbit_misc:rs(QueueName)]).
 
 -spec with_exclusive_access_or_die(name(), pid(), qfun(A)) ->
-          A | rabbit_types:channel_exit().
-
+    A | rabbit_types:channel_exit().
 with_exclusive_access_or_die(Name, ReaderPid, F) ->
     with_or_die(Name,
-                fun (Q) -> check_exclusive_access(Q, ReaderPid), F(Q) end).
+                fun (Q) ->
+                        check_exclusive_access(Q, ReaderPid),
+                        F(Q)
+                end).
 
 assert_args_equivalence(Q, NewArgs) ->
     ExistingArgs = amqqueue:get_arguments(Q),
@@ -793,7 +796,33 @@ assert_args_equivalence(Q, NewArgs) ->
     QueueTypeArgs = rabbit_queue_type:arguments(queue_arguments, Type),
     rabbit_misc:assert_args_equivalence(ExistingArgs, NewArgs, QueueName, QueueTypeArgs).
 
-check_declare_arguments(QueueName, Args) ->
+-spec maybe_inject_default_queue_type_shortcut_into_args(
+    rabbit_framing:amqp_table(), rabbit_queue_type:queue_type()) -> rabbit_framing:amqp_table().
+maybe_inject_default_queue_type_shortcut_into_args(Args0, DefaultQueueType) ->
+    case rabbit_misc:table_lookup(Args0, <<"x-queue-type">>) of
+        undefined ->
+            inject_default_queue_type_shortcut_into_args(Args0, DefaultQueueType);
+        {longstr, undefined} ->
+            %% Important: use a shortcut such as 'quorum' or 'stream' that for the given queue type module
+            inject_default_queue_type_shortcut_into_args(Args0, DefaultQueueType);
+        {longstr, <<"undefined">>} ->
+            %% Important: use a shortcut such as 'quorum' or 'stream' that for the given queue type module
+            inject_default_queue_type_shortcut_into_args(Args0, DefaultQueueType);
+        _ValueIsAlreadySet ->
+            Args0
+    end.
+
+-spec inject_default_queue_type_shortcut_into_args(
+    rabbit_framing:amqp_table(), rabbit_queue_type:queue_type()) -> rabbit_framing:amqp_table().
+inject_default_queue_type_shortcut_into_args(Args0, QueueType) ->
+    Shortcut = rabbit_queue_type:short_alias_of(QueueType),
+    NewVal = rabbit_data_coercion:to_binary(Shortcut),
+    rabbit_misc:set_table_value(Args0, <<"x-queue-type">>, longstr, NewVal).
+
+check_declare_arguments(QueueName, Args0, DefaultQueueType) ->
+    %% If the x-queue-type was not provided by the client, inject the
+    %% (virtual host, global or fallback) default before performing validation. MK.
+    Args = maybe_inject_default_queue_type_shortcut_into_args(Args0, DefaultQueueType),
     check_arguments_type_and_value(QueueName, Args, [{<<"x-queue-type">>, fun check_queue_type/2}]),
     Type = get_queue_type(Args),
     QueueTypeArgs = rabbit_queue_type:arguments(queue_arguments, Type),
@@ -861,7 +890,6 @@ declare_args() ->
      {<<"x-queue-leader-locator">>, fun check_queue_leader_locator_arg/2}].
 
 consume_args() -> [{<<"x-priority">>,              fun check_int_arg/2},
-                   {<<"x-cancel-on-ha-failover">>, fun check_bool_arg/2},
                    {<<"x-stream-offset">>, fun check_stream_offset_arg/2}].
 
 check_int_arg({Type, _}, _) ->
@@ -1110,6 +1138,8 @@ check_queue_type(Val, _Args) when is_binary(Val) ->
         true  -> ok;
         false -> {error, rabbit_misc:format("unsupported queue type '~ts'", [Val])}
     end;
+check_queue_type(Val, Args) when is_atom(Val) ->
+    check_queue_type(rabbit_data_coercion:to_binary(Val), Args);
 check_queue_type(_Val, _Args) ->
     {error, invalid_queue_type}.
 
@@ -1129,7 +1159,7 @@ list() ->
 count() ->
     rabbit_db_queue:count().
 
--spec list_names() -> [rabbit_amqqueue:name()].
+-spec list_names() -> [name()].
 
 list_names() ->
     rabbit_db_queue:list().
@@ -1160,7 +1190,7 @@ is_down(Q) ->
 -spec sample_local_queues() -> [amqqueue:amqqueue()].
 sample_local_queues() -> sample_n_by_name(list_local_names(), 300).
 
--spec sample_n_by_name([rabbit_amqqueue:name()], pos_integer()) -> [amqqueue:amqqueue()].
+-spec sample_n_by_name([name()], pos_integer()) -> [amqqueue:amqqueue()].
 sample_n_by_name([], _N) ->
     [];
 sample_n_by_name(Names, N) when is_list(Names) andalso is_integer(N) andalso N > 0 ->
@@ -1174,7 +1204,7 @@ sample_n_by_name(Names, N) when is_list(Names) andalso is_integer(N) andalso N >
                      end,
          [], lists:seq(1, M)),
     lists:map(fun (Id) ->
-                {ok, Q} = rabbit_amqqueue:lookup(Id),
+                {ok, Q} = lookup(Id),
                 Q
               end,
               lists:usort(Ids)).
@@ -1197,7 +1227,7 @@ list_by_type(stream)  -> list_by_type(rabbit_stream_queue);
 list_by_type(Type) ->
     rabbit_db_queue:get_all_durable_by_type(Type).
 
--spec list_local_quorum_queue_names() -> [rabbit_amqqueue:name()].
+-spec list_local_quorum_queue_names() -> [name()].
 
 list_local_quorum_queue_names() ->
     [ amqqueue:get_name(Q) || Q <- list_by_type(quorum),
@@ -1212,9 +1242,12 @@ list_local_quorum_queues() ->
 
 -spec list_local_stream_queues() -> [amqqueue:amqqueue()].
 list_local_stream_queues() ->
-    [ Q || Q <- list_by_type(stream),
-      amqqueue:get_state(Q) =/= crashed,
-      lists:member(node(), get_quorum_nodes(Q))].
+    list_stream_queues_on(node()).
+
+-spec list_stream_queues_on(node()) -> [amqqueue:amqqueue()].
+list_stream_queues_on(Node) when is_atom(Node) ->
+     [Q || Q <- list_by_type(rabbit_stream_queue),
+           lists:member(Node, get_quorum_nodes(Q))].
 
 -spec list_local_leaders() -> [amqqueue:amqqueue()].
 list_local_leaders() ->
@@ -1227,52 +1260,10 @@ list_local_followers() ->
     [Q
       || Q <- list(),
          amqqueue:is_quorum(Q),
-         amqqueue:get_state(Q) =/= crashed,
          amqqueue:get_leader(Q) =/= node(),
+         lists:member(node(), get_quorum_nodes(Q)),
          rabbit_quorum_queue:is_recoverable(Q)
          ].
-
--spec list_local_mirrored_classic_queues() -> [amqqueue:amqqueue()].
-list_local_mirrored_classic_queues() ->
-    [ Q || Q <- list(),
-        amqqueue:get_state(Q) =/= crashed,
-        amqqueue:is_classic(Q),
-        is_local_to_node(amqqueue:get_pid(Q), node()),
-        is_replicated(Q)].
-
--spec list_local_mirrored_classic_names() -> [rabbit_amqqueue:name()].
-list_local_mirrored_classic_names() ->
-    [ amqqueue:get_name(Q) || Q <- list(),
-           amqqueue:get_state(Q) =/= crashed,
-           amqqueue:is_classic(Q),
-           is_local_to_node(amqqueue:get_pid(Q), node()),
-           is_replicated(Q)].
-
--spec list_local_mirrored_classic_without_synchronised_mirrors() ->
-    [amqqueue:amqqueue()].
-list_local_mirrored_classic_without_synchronised_mirrors() ->
-    [ Q || Q <- list(),
-         amqqueue:get_state(Q) =/= crashed,
-         amqqueue:is_classic(Q),
-         %% filter out exclusive queues as they won't actually be mirrored
-         is_not_exclusive(Q),
-         is_local_to_node(amqqueue:get_pid(Q), node()),
-         is_replicated(Q),
-         not has_synchronised_mirrors_online(Q)].
-
--spec list_local_mirrored_classic_without_synchronised_mirrors_for_cli() ->
-    [#{binary => any()}].
-list_local_mirrored_classic_without_synchronised_mirrors_for_cli() ->
-    ClassicQs = list_local_mirrored_classic_without_synchronised_mirrors(),
-    [begin
-         #resource{name = Name} = amqqueue:get_name(Q),
-         #{
-             <<"readable_name">> => rabbit_data_coercion:to_binary(rabbit_misc:rs(amqqueue:get_name(Q))),
-             <<"name">>          => Name,
-             <<"virtual_host">>  => amqqueue:get_vhost(Q),
-             <<"type">>          => <<"classic">>
-         }
-     end || Q <- ClassicQs].
 
 -spec list_local_quorum_queues_with_name_matching(binary()) -> [amqqueue:amqqueue()].
 list_local_quorum_queues_with_name_matching(Pattern) ->
@@ -1306,22 +1297,35 @@ is_in_virtual_host(Q, VHostName) ->
 
 -spec list(vhost:name()) -> [amqqueue:amqqueue()].
 list(VHostPath) ->
+    list(VHostPath, rabbit_nodes:list_running()).
+
+list(VHostPath, NodesRunning) ->
     All = rabbit_db_queue:get_all(VHostPath),
-    NodesRunning = rabbit_nodes:list_running(),
     lists:filter(fun (Q) ->
                          Pid = amqqueue:get_pid(Q),
                          St = amqqueue:get_state(Q),
-                         St =/= stopped orelse is_local_to_node_set(Pid, NodesRunning)
+                         St =/= stopped orelse
+                             is_local_to_node_set(Pid, NodesRunning)
                  end, All).
 
--spec list_down(rabbit_types:vhost()) -> [amqqueue:amqqueue()].
+-spec list_all(vhost:name()) -> [amqqueue:amqqueue()].
+list_all(VHostPath) ->
+    rabbit_db_queue:get_all(VHostPath).
 
+-spec list_down(rabbit_types:vhost()) ->
+    [amqqueue:amqqueue()].
 list_down(VHostPath) ->
+    list_down(VHostPath, rabbit_nodes:list_running()).
+
+-spec list_down(rabbit_types:vhost(), NodesRunning :: [node()]) ->
+    [amqqueue:amqqueue()].
+list_down(VHostPath, NodesRunning) ->
     case rabbit_vhost:exists(VHostPath) of
         false -> [];
         true  ->
-            Alive = sets:from_list([amqqueue:get_name(Q) || Q <- list(VHostPath)]),
-            NodesRunning = rabbit_nodes:list_running(),
+            Alive = sets:from_list([amqqueue:get_name(Q) ||
+                                    Q <- list(VHostPath, NodesRunning)],
+                                   [{version, 2}]),
             rabbit_db_queue:filter_all_durable(
               fun (Q) ->
                       N = amqqueue:get_name(Q),
@@ -1329,7 +1333,8 @@ list_down(VHostPath) ->
                       St = amqqueue:get_state(Q),
                       amqqueue:get_vhost(Q) =:= VHostPath
                           andalso
-                            ((St =:= stopped andalso not is_local_to_node_set(Pid, NodesRunning))
+                            ((St =:= stopped andalso
+                              not is_local_to_node_set(Pid, NodesRunning))
                              orelse
                                (not sets:is_element(N, Alive)))
               end)
@@ -1381,10 +1386,20 @@ is_unresponsive(Q, Timeout) when ?amqqueue_is_stream(Q) ->
     catch
         exit:{timeout, _} ->
             true
+    end;
+is_unresponsive(Q, Timeout) when ?amqqueue_is_mqtt_qos0(Q) ->
+    QPid = amqqueue:get_pid(Q),
+    try
+        delegate:invoke(QPid, {gen_server2, call, [{info, [name]}, Timeout]}),
+        false
+    catch
+        %% TODO catch any exit??
+        exit:{timeout, _} ->
+            true
     end.
 
-format(Q) when ?amqqueue_is_quorum(Q) -> rabbit_quorum_queue:format(Q);
-format(Q) -> rabbit_amqqueue_process:format(Q).
+format(Q) ->
+    rabbit_queue_type:format(Q, #{}).
 
 -spec info(amqqueue:amqqueue()) -> rabbit_types:infos().
 
@@ -1421,13 +1436,15 @@ emit_info_local(VHostPath, Items, Ref, AggregatorPid) ->
       AggregatorPid, Ref, fun(Q) -> info(Q, Items) end, list_local(VHostPath)).
 
 emit_info_all(Nodes, VHostPath, Items, Ref, AggregatorPid) ->
-    Pids = [ spawn_link(Node, rabbit_amqqueue, emit_info_local, [VHostPath, Items, Ref, AggregatorPid]) || Node <- Nodes ],
+    Pids = [spawn_link(Node, rabbit_amqqueue, emit_info_local,
+                       [VHostPath, Items, Ref, AggregatorPid]) || Node <- Nodes],
     rabbit_control_misc:await_emitters_termination(Pids).
 
 collect_info_all(VHostPath, Items) ->
     Nodes = rabbit_nodes:list_running(),
     Ref = make_ref(),
-    Pids = [ spawn_link(Node, rabbit_amqqueue, emit_info_local, [VHostPath, Items, Ref, self()]) || Node <- Nodes ],
+    Pids = [spawn_link(Node, rabbit_amqqueue, emit_info_local,
+                       [VHostPath, Items, Ref, self()]) || Node <- Nodes],
     rabbit_control_misc:await_emitters_termination(Pids),
     wait_for_queues(Ref, length(Pids), []).
 
@@ -1468,7 +1485,8 @@ info_local(VHostPath) ->
 
 list_local(VHostPath) ->
     [Q || Q <- list(VHostPath),
-          amqqueue:get_state(Q) =/= crashed, is_local_to_node(amqqueue:get_pid(Q), node())].
+          amqqueue:get_state(Q) =/= crashed,
+          is_local_to_node(amqqueue:get_pid(Q), node())].
 
 -spec force_event_refresh(reference()) -> 'ok'.
 
@@ -1642,7 +1660,7 @@ delete_with(QueueName, ConnPid, IfUnused, IfEmpty, Username, CheckExclusive) whe
         {error, not_empty} ->
             rabbit_misc:precondition_failed("~ts not empty", [rabbit_misc:rs(QueueName)]);
         {error, {exit, _, _}} ->
-            %% rabbit_amqqueue:delete()/delegate:invoke might return {error, {exit, _, _}}
+            %% delete()/delegate:invoke might return {error, {exit, _, _}}
             {ok, 0};
         {ok, Count} ->
             {ok, Count};
@@ -1702,15 +1720,6 @@ deactivate_limit_all(QRefs, ChPid) ->
     delegate:invoke_no_result(QPids, {gen_server2, cast,
                                       [{deactivate_limit, ChPid}]}).
 
--spec credit(amqqueue:amqqueue(),
-             rabbit_types:ctag(),
-             non_neg_integer(),
-             boolean(),
-             rabbit_queue_type:state()) ->
-    {ok, rabbit_queue_type:state(), rabbit_queue_type:actions()}.
-credit(Q, CTag, Credit, Drain, QStates) ->
-    rabbit_queue_type:credit(Q, CTag, Credit, Drain, QStates).
-
 -spec basic_get(amqqueue:amqqueue(), boolean(), pid(), rabbit_types:ctag(),
                 rabbit_queue_type:state()) ->
           {'ok', non_neg_integer(), qmsg(), rabbit_queue_type:state()} |
@@ -1737,21 +1746,13 @@ basic_consume(Q, NoAck, ChPid, LimiterPid,
              channel_pid => ChPid,
              limiter_pid => LimiterPid,
              limiter_active => LimiterActive,
-             prefetch_count => ConsumerPrefetchCount,
+             mode => {simple_prefetch, ConsumerPrefetchCount},
              consumer_tag => ConsumerTag,
              exclusive_consume => ExclusiveConsume,
              args => Args,
              ok_msg => OkMsg,
              acting_user =>  ActingUser},
     rabbit_queue_type:consume(Q, Spec, QStates).
-
--spec basic_cancel(amqqueue:amqqueue(), rabbit_types:ctag(), any(),
-                   rabbit_types:username(),
-                   rabbit_queue_type:state()) ->
-    {ok, rabbit_queue_type:state()} | {error, term()}.
-basic_cancel(Q, ConsumerTag, OkMsg, ActingUser, QStates) ->
-    rabbit_queue_type:cancel(Q, ConsumerTag,
-                             OkMsg, ActingUser, QStates).
 
 -spec notify_decorators(amqqueue:amqqueue()) -> 'ok'.
 
@@ -1791,66 +1792,28 @@ internal_delete(Queue, ActingUser, Reason) ->
 
 -spec forget_all_durable(node()) -> 'ok'.
 
+%% TODO this is used by `rabbit_mnesia:remove_node_if_mnesia_running`
+%% Does it make any sense once mnesia is not used/removed?
 forget_all_durable(Node) ->
     UpdateFun = fun(Q) ->
-                        forget_node_for_queue(Node, Q)
+                        forget_node_for_queue(Q)
                 end,
     FilterFun = fun(Q) ->
                         is_local_to_node(amqqueue:get_pid(Q), Node)
                 end,
     rabbit_db_queue:foreach_durable(UpdateFun, FilterFun).
 
-%% Try to promote a mirror while down - it should recover as a
-%% leader. We try to take the oldest mirror here for best chance of
-%% recovery.
-forget_node_for_queue(_DeadNode, Q)
+forget_node_for_queue(Q)
   when ?amqqueue_is_quorum(Q) ->
     ok;
-forget_node_for_queue(_DeadNode, Q)
+forget_node_for_queue(Q)
   when ?amqqueue_is_stream(Q) ->
     ok;
-forget_node_for_queue(DeadNode, Q) ->
-    RS = amqqueue:get_recoverable_slaves(Q),
-    forget_node_for_queue(DeadNode, RS, Q).
-
-forget_node_for_queue(_DeadNode, [], Q) ->
-    %% No mirrors to recover from, queue is gone.
+forget_node_for_queue(Q) ->
     %% Don't process_deletions since that just calls callbacks and we
     %% are not really up.
     Name = amqqueue:get_name(Q),
-    rabbit_db_queue:internal_delete(Name, true, normal);
-
-%% Should not happen, but let's be conservative.
-forget_node_for_queue(DeadNode, [DeadNode | T], Q) ->
-    forget_node_for_queue(DeadNode, T, Q);
-
-forget_node_for_queue(DeadNode, [H|T], Q) when ?is_amqqueue(Q) ->
-    Type = amqqueue:get_type(Q),
-    case {node_permits_offline_promotion(H), Type} of
-        {false, _} -> forget_node_for_queue(DeadNode, T, Q);
-        {true, rabbit_classic_queue} ->
-            Q1 = amqqueue:set_pid(Q, rabbit_misc:node_to_fake_pid(H)),
-            %% rabbit_db_queue:set_many/1 just stores a durable queue record,
-            %% that is the only one required here.
-            %% rabbit_db_queue:set/1 writes both durable and transient, thus
-            %% can't be used for this operation.
-            ok = rabbit_db_queue:set_many([Q1]);
-        {true, rabbit_quorum_queue} ->
-            ok
-    end.
-
-node_permits_offline_promotion(Node) ->
-    case node() of
-        Node -> not rabbit:is_running(); %% [1]
-        _    -> NotRunning = rabbit_nodes:list_not_running(),
-                lists:member(Node, NotRunning) %% [2]
-    end.
-%% [1] In this case if we are a real running node (i.e. rabbitmqctl
-%% has RPCed into us) then we cannot allow promotion. If on the other
-%% hand we *are* rabbitmqctl impersonating the node for offline
-%% node-forgetting then we can.
-%%
-%% [2] This is simpler; as long as it's down that's OK
+    rabbit_db_queue:internal_delete(Name, true, normal).
 
 -spec run_backing_queue
         (pid(), atom(), (fun ((atom(), A) -> {[rabbit_types:msg_id()], A}))) ->
@@ -1859,43 +1822,10 @@ node_permits_offline_promotion(Node) ->
 run_backing_queue(QPid, Mod, Fun) ->
     gen_server2:cast(QPid, {run_backing_queue, Mod, Fun}).
 
--spec set_ram_duration_target(pid(), number() | 'infinity') -> 'ok'.
-
-set_ram_duration_target(QPid, Duration) ->
-    gen_server2:cast(QPid, {set_ram_duration_target, Duration}).
-
--spec set_maximum_since_use(pid(), non_neg_integer()) -> 'ok'.
-
-set_maximum_since_use(QPid, Age) ->
-    gen_server2:cast(QPid, {set_maximum_since_use, Age}).
-
--spec update_mirroring(pid()) -> 'ok'.
-
-update_mirroring(QPid) ->
-    ok = delegate:invoke_no_result(QPid, {gen_server2, cast, [update_mirroring]}).
-
--spec sync_mirrors(amqqueue:amqqueue() | pid()) ->
-          'ok' | rabbit_types:error('not_mirrored').
-
-sync_mirrors(Q) when ?is_amqqueue(Q) ->
-    QPid = amqqueue:get_pid(Q),
-    delegate:invoke(QPid, {gen_server2, call, [sync_mirrors, infinity]});
-sync_mirrors(QPid) ->
-    delegate:invoke(QPid, {gen_server2, call, [sync_mirrors, infinity]}).
-
--spec cancel_sync_mirrors(amqqueue:amqqueue() | pid()) ->
-          'ok' | {'ok', 'not_syncing'}.
-
-cancel_sync_mirrors(Q) when ?is_amqqueue(Q) ->
-    QPid = amqqueue:get_pid(Q),
-    delegate:invoke(QPid, {gen_server2, call, [cancel_sync_mirrors, infinity]});
-cancel_sync_mirrors(QPid) ->
-    delegate:invoke(QPid, {gen_server2, call, [cancel_sync_mirrors, infinity]}).
-
 -spec is_replicated(amqqueue:amqqueue()) -> boolean().
 
 is_replicated(Q) when ?amqqueue_is_classic(Q) ->
-    rabbit_mirror_queue_misc:is_mirrored(Q);
+    false;
 is_replicated(_Q) ->
     %% streams and quorum queues are all replicated
     true.
@@ -1914,61 +1844,48 @@ is_dead_exclusive(Q) when ?amqqueue_exclusive_owner_is_pid(Q) ->
     Pid = amqqueue:get_pid(Q),
     not rabbit_process:is_process_alive(Pid).
 
--spec has_synchronised_mirrors_online(amqqueue:amqqueue()) -> boolean().
-has_synchronised_mirrors_online(Q) ->
-    %% a queue with all mirrors down would have no mirror pids.
-    %% We treat these as in sync intentionally to avoid false positives.
-    MirrorPids = amqqueue:get_sync_slave_pids(Q),
-    MirrorPids =/= [] andalso lists:any(fun rabbit_misc:is_process_alive/1, MirrorPids).
-
 -spec on_node_up(node()) -> 'ok'.
 
-on_node_up(Node) ->
-    rabbit_db_queue:foreach_transient(maybe_clear_recoverable_node(Node)).
-
-maybe_clear_recoverable_node(Node) ->
-    fun(Q) ->
-            SPids = amqqueue:get_sync_slave_pids(Q),
-            RSs = amqqueue:get_recoverable_slaves(Q),
-            case lists:member(Node, RSs) of
-                true  ->
-                    %% There is a race with
-                    %% rabbit_mirror_queue_slave:record_synchronised/1 called
-                    %% by the incoming mirror node and this function, called
-                    %% by the leader node. If this function is executed after
-                    %% record_synchronised/1, the node is erroneously removed
-                    %% from the recoverable mirror list.
-                    %%
-                    %% We check if the mirror node's queue PID is alive. If it is
-                    %% the case, then this function is executed after. In this
-                    %% situation, we don't touch the queue record, it is already
-                    %% correct.
-                    DoClearNode =
-                        case [SP || SP <- SPids, node(SP) =:= Node] of
-                            [SPid] -> not rabbit_misc:is_process_alive(SPid);
-                            _      -> true
-                        end,
-                    if
-                        DoClearNode -> RSs1 = RSs -- [Node],
-                                       store_queue(
-                                         amqqueue:set_recoverable_slaves(Q, RSs1));
-                        true        -> ok
-                    end;
-                false ->
-                    ok
-            end
-    end.
+on_node_up(_Node) ->
+    ok.
 
 -spec on_node_down(node()) -> 'ok'.
 
 on_node_down(Node) ->
+    case delete_transient_queues_on_node(Node) of
+        ok ->
+            ok;
+        {error, timeout} ->
+            %% This case is possible when running Khepri. The node going down
+            %% could leave the cluster in a minority so the command to delete
+            %% the transient queue records would fail. Also see
+            %% `rabbit_khepri:init/0': we also try this deletion when the node
+            %% restarts - a time that the cluster is very likely to have a
+            %% majority - to ensure these records are deleted.
+            rabbit_log:warning("transient queues for node '~ts' could not be "
+                               "deleted because of a timeout. These queues "
+                               "will be removed when node '~ts' restarts or "
+                               "is removed from the cluster.", [Node, Node]),
+            ok
+    end.
+
+-spec delete_transient_queues_on_node(Node) -> Ret when
+      Node :: node(),
+      Ret :: ok | rabbit_khepri:timeout_error().
+
+delete_transient_queues_on_node(Node) ->
     {Time, Ret} = timer:tc(fun() -> rabbit_db_queue:delete_transient(filter_transient_queues_to_delete(Node)) end),
     case Ret of
-        ok -> ok;
-        {QueueNames, Deletions} ->
+        ok ->
+            ok;
+        {error, timeout} = Err ->
+            Err;
+        {QueueNames, Deletions} when is_list(QueueNames) ->
             case length(QueueNames) of
                 0 -> ok;
-                _ -> rabbit_log:info("~tp transient queues from an old incarnation of node ~tp deleted in ~fs", [length(QueueNames), Node, Time/1000000])
+                N -> rabbit_log:info("~b transient queues from node '~ts' "
+                                     "deleted in ~fs",
+                                     [N, Node, Time / 1_000_000])
             end,
             notify_queue_binding_deletions(Deletions),
             rabbit_core_metrics:queues_deleted(QueueNames),
@@ -1981,8 +1898,9 @@ filter_transient_queues_to_delete(Node) ->
             amqqueue:qnode(Q) == Node andalso
                 not rabbit_process:is_process_alive(amqqueue:get_pid(Q))
                 andalso (not amqqueue:is_classic(Q) orelse not amqqueue:is_durable(Q))
-                andalso (not rabbit_amqqueue:is_replicated(Q)
-                         orelse rabbit_amqqueue:is_dead_exclusive(Q))
+                andalso (not is_replicated(Q)
+                         orelse is_dead_exclusive(Q))
+                andalso amqqueue:get_type(Q) =/= rabbit_mqtt_qos0_queue
     end.
 
 notify_queue_binding_deletions(QueueDeletions) when is_list(QueueDeletions) ->
@@ -2000,7 +1918,7 @@ notify_transient_queues_deleted(QueueDeletions) ->
       fun(Queue) ->
               ok = rabbit_event:notify(queue_deleted,
                                        [{name, Queue},
-                                        {kind, rabbit_classic_queue},
+                                        {type, rabbit_classic_queue},
                                         {user, ?INTERNAL_USER}])
       end,
       QueueDeletions).
@@ -2096,7 +2014,7 @@ queue_names(Queues)
 get_bcc_queue(Q, BCCName) ->
     #resource{virtual_host = VHost} = amqqueue:get_name(Q),
     BCCQueueName = rabbit_misc:r(VHost, queue, BCCName),
-    rabbit_amqqueue:lookup(BCCQueueName).
+    lookup(BCCQueueName).
 
 is_queue_args_combination_permitted(Q) ->
     Durable = amqqueue:is_durable(Q),

@@ -2,7 +2,7 @@
 ## License, v. 2.0. If a copy of the MPL was not distributed with this
 ## file, You can obtain one at https://mozilla.org/MPL/2.0/.
 ##
-## Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+## Copyright (c) 2007-2023 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.  All rights reserved.
 
 defmodule RabbitMQ.CLI.Ctl.Commands.ImportDefinitionsCommand do
   alias RabbitMQ.CLI.Core.{Config, DocGuide, ExitCodes, Helpers}
@@ -121,7 +121,7 @@ defmodule RabbitMQ.CLI.Ctl.Commands.ImportDefinitionsCommand do
       false ->
         {:ok,
          "Successfully started definition import. " <>
-           "This process is asynchronous and can take some time.\n"}
+           "This process is asynchronous and can take some time. Watch target node logs for completion.\n"}
     end
   end
 

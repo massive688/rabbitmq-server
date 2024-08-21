@@ -2,10 +2,13 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2024 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_db_msup).
+
+-include_lib("khepri/include/khepri.hrl").
+-include("mirrored_supervisor.hrl").
 
 -export([
          create_tables/0,
@@ -19,6 +22,11 @@
 
 -export([clear/0]).
 
+-export([
+         khepri_mirrored_supervisor_path/2,
+         khepri_mirrored_supervisor_path/0
+        ]).
+
 -define(TABLE, mirrored_sup_childspec).
 -define(TABLE_DEF,
         {?TABLE,
@@ -26,8 +34,6 @@
           {type, ordered_set},
           {attributes, record_info(fields, mirrored_sup_childspec)}]}).
 -define(TABLE_MATCH, {match, #mirrored_sup_childspec{ _ = '_' }}).
-
--record(mirrored_sup_childspec, {key, mirroring_pid, childspec}).
 
 %% -------------------------------------------------------------------
 %% create_tables().
@@ -37,7 +43,10 @@
       Ret :: 'ok' | {error, Reason :: term()}.
 
 create_tables() ->
-    create_tables_in_mnesia([?TABLE_DEF]).
+    rabbit_khepri:handle_fallback(
+      #{mnesia => fun() -> create_tables_in_mnesia([?TABLE_DEF]) end,
+        khepri => fun() -> ok end
+       }).
 
 create_tables_in_mnesia([]) ->
     ok;
@@ -64,15 +73,24 @@ table_definitions() ->
 %% -------------------------------------------------------------------
 
 -spec create_or_update(Group, Overall, Delegate, ChildSpec, Id) -> Ret when
-      Group :: any(),
+      Group :: mirrored_supervisor:group_name(),
       Overall :: pid(),
       Delegate :: pid() | undefined,
       ChildSpec :: supervisor2:child_spec(),
-      Id :: {any(), any()},
+      Id :: mirrored_supervisor:child_id(),
       Ret :: start | undefined | pid().
 
 create_or_update(Group, Overall, Delegate, ChildSpec, Id) ->
-    create_or_update_in_mnesia(Group, Overall, Delegate, ChildSpec, Id).
+    rabbit_khepri:handle_fallback(
+      #{mnesia =>
+            fun() ->
+                    create_or_update_in_mnesia(Group, Overall, Delegate, ChildSpec, Id)
+            end,
+        khepri =>
+            fun() ->
+                    create_or_update_in_khepri(Group, Overall, Delegate, ChildSpec, Id)
+            end
+       }).
 
 create_or_update_in_mnesia(Group, Overall, Delegate, ChildSpec, Id) ->
     rabbit_mnesia:execute_mnesia_transaction(
@@ -111,16 +129,54 @@ write_in_mnesia(Group, Overall, ChildSpec, Id) ->
     ok = mnesia:write(?TABLE, S, write),
     ChildSpec.
 
+create_or_update_in_khepri(Group, Overall, Delegate, ChildSpec, Id) ->
+    Path = khepri_mirrored_supervisor_path(Group, Id),
+    S = #mirrored_sup_childspec{key           = {Group, Id},
+                                mirroring_pid = Overall,
+                                childspec     = ChildSpec},
+    case rabbit_khepri:adv_get(Path) of
+        {ok, #{data := #mirrored_sup_childspec{mirroring_pid = Pid},
+               payload_version := Vsn}} ->
+            case Overall of
+                Pid ->
+                    Delegate;
+                _   ->
+                    %% The supervisor(Pid) call can't happen inside of a transaction.
+                    %% We have to read and update the record in two different khepri calls
+                    case mirrored_supervisor:supervisor(Pid) of
+                        dead ->
+                            UpdatePath =
+                                khepri_path:combine_with_conditions(
+                                  Path, [#if_payload_version{version = Vsn}]),
+                            Ret = rabbit_khepri:put(UpdatePath, S),
+                            case Ret of
+                                ok -> start;
+                                {error, {khepri, mismatching_node, _}} ->
+                                    create_or_update_in_khepri(Group, Overall, Delegate, ChildSpec, Id);
+                                {error, _} = Error -> Error
+                            end;
+                        Delegate0 ->
+                            Delegate0
+                    end
+            end;
+        _  ->
+            ok = rabbit_khepri:put(Path, S),
+            start
+    end.
+
 %% -------------------------------------------------------------------
 %% delete().
 %% -------------------------------------------------------------------
 
 -spec delete(Group, Id) -> ok when
-      Group :: any(),
-      Id :: any().
+      Group :: mirrored_supervisor:group_name(),
+      Id :: mirrored_supervisor:child_id().
 
 delete(Group, Id) ->
-    delete_in_mnesia(Group, Id).
+    rabbit_khepri:handle_fallback(
+      #{mnesia => fun() -> delete_in_mnesia(Group, Id) end,
+        khepri => fun() -> delete_in_khepri(Group, Id) end
+       }).
 
 delete_in_mnesia(Group, Id) ->
     rabbit_mnesia:execute_mnesia_transaction(
@@ -128,20 +184,26 @@ delete_in_mnesia(Group, Id) ->
               ok = mnesia:delete({?TABLE, {Group, Id}})
       end).
 
+delete_in_khepri(Group, Id) ->
+    ok = rabbit_khepri:delete(khepri_mirrored_supervisor_path(Group, Id)).
+
 %% -------------------------------------------------------------------
 %% find_mirror().
 %% -------------------------------------------------------------------
 
 -spec find_mirror(Group, Id) -> Ret when
-      Group :: any(),
-      Id :: any(),
+      Group :: mirrored_supervisor:group_name(),
+      Id :: mirrored_supervisor:child_id(),
       Ret :: {ok, pid()} | {error, not_found}.
 
 find_mirror(Group, Id) ->
     %% If we did this inside a tx we could still have failover
     %% immediately after the tx - we can't be 100% here. So we may as
     %% well dirty_select.
-    find_mirror_in_mnesia(Group, Id).
+    rabbit_khepri:handle_fallback(
+      #{mnesia => fun() -> find_mirror_in_mnesia(Group, Id) end,
+        khepri => fun() -> find_mirror_in_khepri(Group, Id) end
+       }).
 
 find_mirror_in_mnesia(Group, Id) ->
     MatchHead = #mirrored_sup_childspec{mirroring_pid = '$1',
@@ -150,6 +212,14 @@ find_mirror_in_mnesia(Group, Id) ->
     case mnesia:dirty_select(?TABLE, [{MatchHead, [], ['$1']}]) of
         [Mirror] -> {ok, Mirror};
         _ -> {error, not_found}
+    end.
+
+find_mirror_in_khepri(Group, Id) ->
+    case rabbit_khepri:get(khepri_mirrored_supervisor_path(Group, Id)) of
+        {ok, #mirrored_sup_childspec{mirroring_pid = Pid}} ->
+            {ok, Pid};
+        _ ->
+            {error, not_found}
     end.
 
 %% -------------------------------------------------------------------
@@ -161,7 +231,10 @@ find_mirror_in_mnesia(Group, Id) ->
       ChildSpec :: supervisor2:child_spec().
 
 update_all(Overall, OldOverall) ->
-    update_all_in_mnesia(Overall, OldOverall).
+    rabbit_khepri:handle_fallback(
+      #{mnesia => fun() -> update_all_in_mnesia(Overall, OldOverall) end,
+        khepri => fun() -> update_all_in_khepri(Overall, OldOverall) end
+       }).
 
 update_all_in_mnesia(Overall, OldOverall) ->
     rabbit_mnesia:execute_mnesia_transaction(
@@ -174,15 +247,35 @@ update_all_in_mnesia(Overall, OldOverall) ->
                   [{Group, Id}, C] <- mnesia:select(?TABLE, [{MatchHead, [], ['$$']}])]
       end).
 
+update_all_in_khepri(Overall, OldOverall) ->
+    Pattern = #mirrored_sup_childspec{mirroring_pid = OldOverall,
+                                      _             = '_'},
+    Conditions = [?KHEPRI_WILDCARD_STAR_STAR, #if_data_matches{pattern = Pattern}],
+    PathPattern = khepri_mirrored_supervisor_path() ++ [#if_all{conditions = Conditions}],
+    rabbit_khepri:transaction(
+      fun() ->
+              case khepri_tx:get_many(PathPattern) of
+                  {ok, Map} ->
+                      [begin
+                           S = S0#mirrored_sup_childspec{mirroring_pid = Overall},
+                           ok = khepri_tx:put(Path, S),
+                           S0#mirrored_sup_childspec.childspec
+                       end || {Path, S0} <- maps:to_list(Map)]
+              end
+      end).
+
 %% -------------------------------------------------------------------
 %% delete_all().
 %% -------------------------------------------------------------------
 
 -spec delete_all(Group) -> ok when
-      Group :: any().
+      Group :: mirrored_supervisor:group_name().
 
 delete_all(Group) ->
-    delete_all_in_mnesia(Group).
+    rabbit_khepri:handle_fallback(
+      #{mnesia => fun() -> delete_all_in_mnesia(Group) end,
+        khepri => fun() -> delete_all_in_khepri(Group) end
+       }).
 
 delete_all_in_mnesia(Group) ->
     rabbit_mnesia:execute_mnesia_transaction(
@@ -194,6 +287,13 @@ delete_all_in_mnesia(Group) ->
       end),
     ok.
 
+delete_all_in_khepri(Group) ->
+    Pattern = #mirrored_sup_childspec{key = {Group, '_'},
+                                      _   = '_'},
+    Conditions = [?KHEPRI_WILDCARD_STAR_STAR, #if_data_matches{pattern = Pattern}],
+    rabbit_khepri:delete(khepri_mirrored_supervisor_path() ++
+                             [#if_all{conditions = Conditions}]).
+
 %% -------------------------------------------------------------------
 %% clear().
 %% -------------------------------------------------------------------
@@ -201,8 +301,32 @@ delete_all_in_mnesia(Group) ->
 -spec clear() -> ok.
 
 clear() ->
-    clear_in_mnesia().
+    rabbit_khepri:handle_fallback(
+      #{mnesia => fun() -> clear_in_mnesia() end,
+        khepri => fun() -> clear_in_khepri() end
+       }).
 
 clear_in_mnesia() ->
     {atomic, ok} = mnesia:clear_table(?TABLE),
     ok.
+
+clear_in_khepri() ->
+    Path = khepri_mirrored_supervisor_path(),
+    case rabbit_khepri:delete(Path) of
+        ok -> ok;
+        Error -> throw(Error)
+    end.
+
+%% -------------------------------------------------------------------
+%% Khepri paths
+%% -------------------------------------------------------------------
+
+khepri_mirrored_supervisor_path() ->
+    [?MODULE, mirrored_supervisor_childspec].
+
+khepri_mirrored_supervisor_path(Group, Id)
+  when is_atom(Id) orelse is_binary(Id) ->
+    [?MODULE, mirrored_supervisor_childspec, Group, Id];
+khepri_mirrored_supervisor_path(Group, Id) ->
+    IdPath = Group:id_to_khepri_path(Id),
+    [?MODULE, mirrored_supervisor_childspec, Group] ++ IdPath.

@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2024 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_mgmt_util).
@@ -18,7 +18,8 @@
          is_authorized_vhost_visible_for_monitoring/2,
          is_authorized_global_parameters/2]).
 -export([user/1]).
--export([bad_request/3, service_unavailable/3, bad_request_exception/4, internal_server_error/4,
+-export([bad_request/3, service_unavailable/3, bad_request_exception/4,
+         internal_server_error/3, internal_server_error/4,
          id/2, parse_bool/1, parse_int/1, redirect_to_home/3]).
 -export([with_decode/4, not_found/3]).
 -export([with_channel/4, with_channel/5]).
@@ -272,13 +273,23 @@ get_value_param(Name, ReqData) ->
         Bin       -> binary_to_list(Bin)
     end.
 
+get_sorts_param(ReqData, Def) ->
+    case get_value_param(<<"sort">>, ReqData) of
+        undefined ->
+            Def;
+        [] ->
+            Def;
+        S ->
+            [S]
+    end.
+
 reply_list(Facts, DefaultSorts, ReqData, Context, Pagination) ->
     SortList =
-    sort_list_and_paginate(
-          extract_columns_list(Facts, ReqData),
-          DefaultSorts,
-          get_value_param(<<"sort">>, ReqData),
-          get_sort_reverse(ReqData), Pagination),
+        sort_list_and_paginate(
+              extract_columns_list(Facts, ReqData),
+              DefaultSorts,
+              get_sorts_param(ReqData, undefined),
+              get_sort_reverse(ReqData), Pagination),
 
     reply(SortList, ReqData, Context).
 
@@ -320,7 +331,9 @@ reply_list_or_paginate(Facts, ReqData, Context) ->
 merge_sorts(DefaultSorts, Extra) ->
     case Extra of
         undefined -> DefaultSorts;
-        Extra     -> [Extra | DefaultSorts]
+        Extra ->
+            %% it is possible that the extra sorts have an overlap with default
+            lists:uniq(Extra ++ DefaultSorts)
     end.
 
 %% Resource augmentation. Works out the most optimal configuration of the operations:
@@ -352,9 +365,9 @@ augment_resources0(Resources, DefaultSort, BasicColumns, Pagination, ReqData,
     SortFun = fun (AugCtx) -> sort(DefaultSort, AugCtx) end,
     AugFun = fun (AugCtx) -> augment(AugmentFun, AugCtx) end,
     PageFun = fun page/1,
-    Pagination = pagination_params(ReqData),
-    Sort = def(get_value_param(<<"sort">>, ReqData), DefaultSort),
-    Columns = def(columns(ReqData), all),
+    %% Sort needs to be a list of, erm, strings which are lists
+    Sort = get_sorts_param(ReqData, DefaultSort),
+    Columns = columns(ReqData),
     ColumnsAsStrings = columns_as_strings(Columns),
     Pipeline =
         case {Pagination =/= undefined,
@@ -368,7 +381,10 @@ augment_resources0(Resources, DefaultSort, BasicColumns, Pagination, ReqData,
             {true, basic, basic} ->
                 [SortFun, PageFun];
             {true, extended, _} ->
-                % pagination with extended sort columns - SLOW
+                Path = cowboy_req:path(ReqData),
+                rabbit_log:debug("HTTP API: ~s slow query mode requested - extended sort on ~0p",
+                                 [Path, Sort]),
+                % pagination with extended sort columns - SLOW!
                 [AugFun, SortFun, PageFun];
             {true, basic, extended} ->
                 % pagination with extended columns and sorting on basic
@@ -524,7 +540,7 @@ pagination_params(ReqData) ->
                                   [PageNum, PageSize])})
     end.
 
--spec maybe_reverse([any()], string() | true | false) -> [any()].
+-spec maybe_reverse([any()], string() | boolean()) -> [any()].
 maybe_reverse([], _) ->
     [];
 maybe_reverse(RangeList, true) when is_list(RangeList) ->
@@ -659,6 +675,9 @@ not_found(Reason, ReqData, Context) ->
 method_not_allowed(Reason, ReqData, Context) ->
     halt_response(405, method_not_allowed, Reason, ReqData, Context).
 
+internal_server_error(Reason, ReqData, Context) ->
+    internal_server_error(internal_server_error, Reason, ReqData, Context).
+
 internal_server_error(Error, Reason, ReqData, Context) ->
     rabbit_log:error("~ts~n~ts", [Error, Reason]),
     halt_response(500, Error, Reason, ReqData, Context).
@@ -686,15 +705,27 @@ id(Key, ReqData) ->
 
 read_complete_body(Req) ->
     read_complete_body(Req, <<"">>).
-read_complete_body(Req0, Acc) ->
-    case cowboy_req:read_body(Req0) of
-        {ok, Data, Req}   -> {ok, <<Acc/binary, Data/binary>>, Req};
-        {more, Data, Req} -> read_complete_body(Req, <<Acc/binary, Data/binary>>)
+read_complete_body(Req, Acc) ->
+    BodySizeLimit = application:get_env(rabbitmq_management, max_http_body_size, ?MANAGEMENT_DEFAULT_HTTP_MAX_BODY_SIZE),
+    read_complete_body(Req, Acc, BodySizeLimit).
+read_complete_body(Req0, Acc, BodySizeLimit) ->
+    case bit_size(Acc) > BodySizeLimit of
+        true ->
+            {error, "Exceeded HTTP request body size limit"};
+        false ->
+            case cowboy_req:read_body(Req0) of
+                {ok, Data, Req}   -> {ok, <<Acc/binary, Data/binary>>, Req};
+                {more, Data, Req} -> read_complete_body(Req, <<Acc/binary, Data/binary>>)
+            end
     end.
 
 with_decode(Keys, ReqData, Context, Fun) ->
-    {ok, Body, ReqData1} = read_complete_body(ReqData),
-    with_decode(Keys, Body, ReqData1, Context, Fun).
+    case read_complete_body(ReqData) of
+        {error, Reason} ->
+            bad_request(Reason, ReqData, Context);
+        {ok, Body, ReqData1} ->
+            with_decode(Keys, Body, ReqData1, Context, Fun)
+    end.
 
 with_decode(Keys, Body, ReqData, Context, Fun) ->
     case decode(Keys, Body) of
@@ -784,7 +815,8 @@ direct_request(MethodName, Transformers, Extra, ErrorMsg, ReqData,
                       rabbit_log:warning(ErrorMsg, [Explanation]),
                       bad_request(list_to_binary(Explanation), ReqData1, Context);
                   {badrpc, Reason} ->
-                      rabbit_log:warning(ErrorMsg, [Reason]),
+                      Msg = io_lib:format("~tp", [Reason]),
+                      rabbit_log:warning(ErrorMsg, [Msg]),
                       bad_request(
                         list_to_binary(
                           io_lib:format("Request to node ~ts failed with ~tp",
@@ -1095,9 +1127,6 @@ int(Name, ReqData) ->
                          Integer     -> Integer
                      end
     end.
-
-def(undefined, Def) -> Def;
-def(V, _) -> V.
 
 -spec qs_val(binary(), cowboy_req:req()) -> any() | undefined.
 qs_val(Name, ReqData) ->

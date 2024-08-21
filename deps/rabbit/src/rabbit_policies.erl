@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2024 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_policies).
@@ -25,7 +25,7 @@
 
 register() ->
     %% Note: there are more validators registered from other modules,
-    %% such as rabbit_mirror_queue_misc
+    %% such as rabbit_quorum_queue
     [rabbit_registry:register(Class, Name, ?MODULE) ||
         {Class, Name} <- [{policy_validator, <<"alternate-exchange">>},
                           {policy_validator, <<"consumer-timeout">>},
@@ -54,13 +54,17 @@ register() ->
                           {operator_policy_validator, <<"max-in-memory-length">>},
                           {operator_policy_validator, <<"max-in-memory-bytes">>},
                           {operator_policy_validator, <<"delivery-limit">>},
+                          {operator_policy_validator, <<"queue-version">>},
+                          {operator_policy_validator, <<"overflow">>},
                           {policy_merge_strategy, <<"expires">>},
                           {policy_merge_strategy, <<"message-ttl">>},
                           {policy_merge_strategy, <<"max-length">>},
                           {policy_merge_strategy, <<"max-length-bytes">>},
                           {policy_merge_strategy, <<"max-in-memory-length">>},
                           {policy_merge_strategy, <<"max-in-memory-bytes">>},
-                          {policy_merge_strategy, <<"delivery-limit">>}]],
+                          {policy_merge_strategy, <<"delivery-limit">>},
+                          {policy_merge_strategy, <<"queue-version">>},
+                          {policy_merge_strategy, <<"overflow">>}]],
     ok.
 
 -spec validate_policy([{binary(), term()}]) -> rabbit_policy_validator:validate_results().
@@ -211,5 +215,7 @@ merge_policy_value(<<"max-in-memory-length">>, Val, OpVal) -> min(Val, OpVal);
 merge_policy_value(<<"max-in-memory-bytes">>, Val, OpVal) -> min(Val, OpVal);
 merge_policy_value(<<"expires">>, Val, OpVal)          -> min(Val, OpVal);
 merge_policy_value(<<"delivery-limit">>, Val, OpVal)   -> min(Val, OpVal);
+merge_policy_value(<<"queue-version">>, _Val, OpVal)   -> OpVal;
+merge_policy_value(<<"overflow">>, _Val, OpVal)   -> OpVal;
 %% use operator policy value for booleans
 merge_policy_value(_Key, Val, OpVal) when is_boolean(Val) andalso is_boolean(OpVal) -> OpVal.

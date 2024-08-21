@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2024 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 
 %% This test suite covers MQTT 5.0 features.
 -module(v5_SUITE).
@@ -167,21 +167,13 @@ init_per_group(Group, Config0) ->
                 [{mqtt_version, v5},
                  {rmq_nodes_count, Nodes},
                  {rmq_nodename_suffix, Suffix}]),
-    Config2 = rabbit_ct_helpers:merge_app_env(
-                Config1,
-                {rabbit, [{classic_queue_default_version, 2},
-                          {quorum_tick_interval, 200}]}),
-    Config = rabbit_ct_helpers:run_steps(
-               Config2,
-               rabbit_ct_broker_helpers:setup_steps() ++
-               rabbit_ct_client_helpers:setup_steps()),
-    case Group of
-        cluster_size_1 ->
-            ok = rabbit_ct_broker_helpers:enable_feature_flag(Config, mqtt_v5),
-            Config;
-        cluster_size_3 ->
-            util:maybe_skip_v5(Config)
-    end.
+    Config = rabbit_ct_helpers:merge_app_env(
+               Config1,
+               {rabbit, [{quorum_tick_interval, 200}]}),
+    rabbit_ct_helpers:run_steps(
+      Config,
+      rabbit_ct_broker_helpers:setup_steps() ++
+      rabbit_ct_client_helpers:setup_steps()).
 
 end_per_group(G, Config)
   when G =:= cluster_size_1;
@@ -244,7 +236,9 @@ client_set_max_packet_size_publish(Config) ->
     assert_nothing_received(),
     NumRejected = dead_letter_metric(messages_dead_lettered_rejected_total, Config) - NumRejectedBefore,
     ?assertEqual(1, NumRejected),
-    ok = emqtt:disconnect(C).
+    ok = emqtt:disconnect(C),
+    ok.
+
 
 client_set_max_packet_size_connack(Config) ->
     {C, Connect} = start_client(?FUNCTION_NAME, Config, 0,
@@ -1325,22 +1319,21 @@ will_qos2(Config) ->
     ?assertEqual({error, {qos_not_supported, #{}}}, Connect(C)).
 
 will_delay_less_than_session_expiry(Config) ->
-    will_delay(1, 5, Config).
+    will_delay(1, 5, ?FUNCTION_NAME, Config).
 
 will_delay_equals_session_expiry(Config) ->
-    will_delay(1, 1, Config).
+    will_delay(1, 1, ?FUNCTION_NAME, Config).
 
 will_delay_greater_than_session_expiry(Config) ->
-    will_delay(5, 1, Config).
+    will_delay(5, 1, ?FUNCTION_NAME, Config).
 
 %% "The Server delays publishing the Client’s Will Message until the Will Delay
 %% Interval has passed or the Session ends, whichever happens first." [v5 3.1.3.2.2]
-will_delay(WillDelay, SessionExpiry, Config)
+will_delay(WillDelay, SessionExpiry, ClientId, Config)
   when WillDelay =:= 1 orelse
        SessionExpiry =:= 1->
     Topic = <<"a/b">>,
     Msg = <<"msg">>,
-    ClientId = ?FUNCTION_NAME,
     Opts = [{properties, #{'Session-Expiry-Interval' => SessionExpiry}},
             {will_props, #{'Will-Delay-Interval' => WillDelay}},
             {will_topic, Topic},
@@ -1353,8 +1346,9 @@ will_delay(WillDelay, SessionExpiry, Config)
     receive TooEarly -> ct:fail(TooEarly)
     after 800 -> ok
     end,
-    receive {publish, #{payload := Msg}} -> ok
-    after 2000 -> ct:fail(will_message_timeout)
+    receive {publish, #{payload := Msg}} -> ok;
+            Unexpected -> ct:fail({unexpected_message, Unexpected})
+    after 3000 -> ct:fail(will_message_timeout)
     end,
     %% Cleanup
     C2 = connect(ClientId, Config),

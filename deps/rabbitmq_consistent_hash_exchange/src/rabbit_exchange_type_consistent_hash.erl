@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2024 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_exchange_type_consistent_hash).
@@ -260,9 +260,10 @@ jump_consistent_hash_value(_B0, J0, NumberOfBuckets, SeedState0) ->
     jump_consistent_hash_value(B, J, NumberOfBuckets, SeedState).
 
 value_to_hash(undefined, Msg) ->
-    mc:get_annotation(routing_keys, Msg);
-value_to_hash({header, Header}, Msg0) ->
-    maps:get(Header, mc:routing_headers(Msg0, [x_headers]));
+    mc:routing_keys(Msg);
+value_to_hash({header, Header}, Msg) ->
+    Headers = mc:routing_headers(Msg, [x_headers]),
+    maps:get(Header, Headers, undefined);
 value_to_hash({property, Property}, Msg) ->
     case Property of
         <<"correlation_id">> ->

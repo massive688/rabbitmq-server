@@ -2,12 +2,11 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates. All rights reserved.
+%% Copyright (c) 2007-2023 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 
 -module(rabbit_exchange_type_recent_history).
 
 -include_lib("rabbit_common/include/rabbit.hrl").
--include("rabbit_recent_history.hrl").
 
 -behaviour(rabbit_exchange_type).
 
@@ -68,13 +67,13 @@ validate(#exchange{arguments = Args}) ->
     end.
 
 validate_binding(_X, _B) -> ok.
-create(_Tx, _X) -> ok.
+create(_Serial, _X) -> ok.
 policy_changed(_X1, _X2) -> ok.
 
-delete(none, #exchange{ name = XName }) ->
+delete(_Tx, #exchange{ name = XName }) ->
     rabbit_db_rh_exchange:delete(XName).
 
-add_binding(none, #exchange{ name = XName },
+add_binding(_Tx, #exchange{ name = XName },
             #binding{ destination = #resource{kind = queue} = QName }) ->
     _ = case rabbit_amqqueue:lookup(QName) of
         {error, not_found} ->
@@ -84,7 +83,7 @@ add_binding(none, #exchange{ name = XName },
             deliver_messages([Q], Msgs)
     end,
     ok;
-add_binding(none, #exchange{ name = XName },
+add_binding(_Tx, #exchange{ name = XName },
             #binding{ destination = #resource{kind = exchange} = DestName }) ->
     _ = case rabbit_exchange:lookup(DestName) of
         {error, not_found} ->
@@ -101,11 +100,9 @@ add_binding(none, #exchange{ name = XName },
                  end
              end || Msg <- Msgs]
     end,
-    ok;
-add_binding(none, _Exchange, _Binding) ->
     ok.
 
-remove_bindings(_Tx, _X, _Bs) -> ok.
+remove_bindings(_Serial, _X, _Bs) -> ok.
 
 assert_args_equivalence(X, Args) ->
     rabbit_exchange:assert_args_equivalence(X, Args).
@@ -117,8 +114,7 @@ setup_schema() ->
 
 disable_plugin() ->
     rabbit_registry:unregister(exchange, <<"x-recent-history">>),
-    _ = rabbit_db_rh_exchange:delete(),
-    ok.
+    rabbit_db_rh_exchange:delete().
 
 %%----------------------------------------------------------------------------
 %%private

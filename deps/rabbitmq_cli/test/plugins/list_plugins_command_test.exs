@@ -2,11 +2,12 @@
 ## License, v. 2.0. If a copy of the MPL was not distributed with this
 ## file, You can obtain one at https://mozilla.org/MPL/2.0/.
 ##
-## Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+## Copyright (c) 2007-2023 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.  All rights reserved.
 
 defmodule ListPluginsCommandTest do
   use ExUnit.Case, async: false
   import TestHelper
+  import ExUnit.CaptureIO
 
   @command RabbitMQ.CLI.Plugins.Commands.ListCommand
 
@@ -38,7 +39,7 @@ defmodule ListPluginsCommandTest do
     {:ok, [enabled_plugins]} = :file.consult(plugins_file)
 
     IO.puts(
-      "plugins list tests will assume tnat #{Enum.join(enabled_plugins, ",")} is the list of enabled plugins to revert to"
+      "plugins list tests will assume that #{Enum.join(enabled_plugins, ",")} is the list of enabled plugins to revert to"
     )
 
     opts = %{
@@ -443,5 +444,127 @@ defmodule ListPluginsCommandTest do
     } = @command.run([".*"], opts)
 
     assert_plugin_states(actual_plugins2, expected_plugins2)
+  end
+
+  test "run: lists all plugins with missing plugins warning control using --silent", context do
+    opts =
+      context[:opts]
+      |> Map.put_new(:silent, true)
+      |> Map.put_new(:hard_write, true)
+
+    context = Map.replace(context, :opts, opts)
+
+    missing_plugin = :rabbitmq_non_existent
+
+    reset_enabled_plugins_to_preconfigured_defaults(context)
+
+    set_enabled_plugins(
+      [:rabbitmq_federation, missing_plugin],
+      :online,
+      context[:opts][:node],
+      context[:opts]
+    )
+
+    on_exit(fn ->
+      opts =
+        context[:opts]
+        |> Map.delete(:silent)
+        |> Map.delete(:hard_write)
+
+      context = Map.replace(context, :opts, opts)
+
+      set_enabled_plugins(
+        [:rabbitmq_stomp, :rabbitmq_federation],
+        :online,
+        context[:opts][:node],
+        context[:opts]
+      )
+    end)
+
+    expected_plugins = [
+      %{name: :rabbitmq_federation, enabled: :enabled, running: true},
+      %{name: :rabbitmq_stomp, enabled: :not_enabled, running: false}
+    ]
+
+    opts = context[:opts]
+
+    assert capture_io(fn ->
+             %{
+               plugins: actual_plugins
+             } = @command.run([".*"], opts)
+
+             assert_plugin_states(actual_plugins, expected_plugins)
+           end) =~ ~s//
+
+    opts = Map.replace(opts, :silent, false)
+
+    assert capture_io(fn ->
+             %{
+               plugins: actual_plugins
+             } = @command.run([".*"], opts)
+
+             assert_plugin_states(actual_plugins, expected_plugins)
+           end) =~ ~s/WARNING - plugins currently enabled but missing: #{missing_plugin}\n/
+  end
+
+  test "run: lists all plugins with missing plugins warning control using --quiet", context do
+    opts =
+      context[:opts]
+      |> Map.put_new(:quiet, true)
+      |> Map.put_new(:hard_write, true)
+
+    context = Map.replace(context, :opts, opts)
+
+    missing_plugin = :rabbitmq_non_existent
+
+    reset_enabled_plugins_to_preconfigured_defaults(context)
+
+    set_enabled_plugins(
+      [:rabbitmq_federation, missing_plugin],
+      :online,
+      context[:opts][:node],
+      context[:opts]
+    )
+
+    on_exit(fn ->
+      opts =
+        context[:opts]
+        |> Map.delete(:quiet)
+        |> Map.delete(:hard_write)
+
+      context = Map.replace(context, :opts, opts)
+
+      set_enabled_plugins(
+        [:rabbitmq_stomp, :rabbitmq_federation],
+        :online,
+        context[:opts][:node],
+        context[:opts]
+      )
+    end)
+
+    expected_plugins = [
+      %{name: :rabbitmq_federation, enabled: :enabled, running: true},
+      %{name: :rabbitmq_stomp, enabled: :not_enabled, running: false}
+    ]
+
+    opts = context[:opts]
+
+    assert capture_io(fn ->
+             %{
+               plugins: actual_plugins
+             } = @command.run([".*"], opts)
+
+             assert_plugin_states(actual_plugins, expected_plugins)
+           end) =~ ~s//
+
+    opts = Map.replace(opts, :quiet, false)
+
+    assert capture_io(fn ->
+             %{
+               plugins: actual_plugins
+             } = @command.run([".*"], opts)
+
+             assert_plugin_states(actual_plugins, expected_plugins)
+           end) =~ ~s/WARNING - plugins currently enabled but missing: #{missing_plugin}\n/
   end
 end

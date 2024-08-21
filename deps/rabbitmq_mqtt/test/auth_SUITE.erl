@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2024 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 -module(auth_SUITE).
 -compile([export_all,
@@ -97,7 +97,8 @@ sub_groups() ->
        topic_read_permission,
        topic_write_permission,
        topic_write_permission_variable_expansion,
-       loopback_user_connects_from_remote_host
+       loopback_user_connects_from_remote_host,
+       connect_permission
       ]
      },
      {limit, [shuffle],
@@ -122,24 +123,27 @@ init_per_group(authz, Config0) ->
     User = <<"mqtt-user">>,
     Password = <<"mqtt-password">>,
     VHost = <<"mqtt-vhost">>,
-    MqttConfig = {rabbitmq_mqtt, [{default_user, User}
-                                 ,{default_pass, Password}
-                                 ,{allow_anonymous, true}
-                                 ,{vhost, VHost}
-                                 ,{exchange, <<"amq.topic">>}
-                                 ]},
-    Config1 = rabbit_ct_helpers:run_setup_steps(rabbit_ct_helpers:merge_app_env(Config0, MqttConfig),
-                                                rabbit_ct_broker_helpers:setup_steps() ++
-                                                    rabbit_ct_client_helpers:setup_steps()),
-    rabbit_ct_broker_helpers:add_user(Config1, User, Password),
-    rabbit_ct_broker_helpers:add_vhost(Config1, VHost),
-    [Log|_] = rpc(Config1, 0, rabbit, log_locations, []),
-    Config2 = [{mqtt_user, User},
-               {mqtt_vhost, VHost},
-               {mqtt_password, Password},
-               {log_location, Log} | Config1],
-    ok = rabbit_ct_broker_helpers:enable_feature_flag(Config2, mqtt_v5),
-    Config2;
+    Env = [{rabbitmq_mqtt,
+            [{allow_anonymous, true},
+             {vhost, VHost},
+             {exchange, <<"amq.topic">>}
+            ]},
+           {rabbit,
+            [{anonymous_login_user, User},
+             {anonymous_login_pass, Password}
+            ]}],
+    Config1 = rabbit_ct_helpers:merge_app_env(Config0, Env),
+    Config = rabbit_ct_helpers:run_setup_steps(
+               Config1,
+               rabbit_ct_broker_helpers:setup_steps() ++
+               rabbit_ct_client_helpers:setup_steps()),
+    rabbit_ct_broker_helpers:add_user(Config, User, Password),
+    rabbit_ct_broker_helpers:add_vhost(Config, VHost),
+    [Log|_] = rpc(Config, 0, rabbit, log_locations, []),
+    [{mqtt_user, User},
+     {mqtt_vhost, VHost},
+     {mqtt_password, Password},
+     {log_location, Log} | Config];
 init_per_group(Group, Config) ->
     Suffix = rabbit_ct_helpers:testcase_absname(Config, "", "-"),
     Config1 = rabbit_ct_helpers:set_config(Config, [
@@ -148,22 +152,20 @@ init_per_group(Group, Config) ->
     ]),
     MqttConfig = mqtt_config(Group),
     AuthConfig = auth_config(Group),
-    Config2 = rabbit_ct_helpers:run_setup_steps(
-                Config1,
-                [fun(Conf) -> case MqttConfig of
-                                  undefined  -> Conf;
-                                  _          -> merge_app_env(MqttConfig, Conf)
-                              end
-                 end] ++
-                [fun(Conf) -> case AuthConfig of
-                                  undefined -> Conf;
-                                  _         -> merge_app_env(AuthConfig, Conf)
-                              end
-                 end] ++
-                rabbit_ct_broker_helpers:setup_steps() ++
-                rabbit_ct_client_helpers:setup_steps()),
-    ok = rabbit_ct_broker_helpers:enable_feature_flag(Config2, mqtt_v5),
-    Config2.
+    rabbit_ct_helpers:run_setup_steps(
+      Config1,
+      [fun(Conf) -> case MqttConfig of
+                        undefined  -> Conf;
+                        _          -> merge_app_env(MqttConfig, Conf)
+                    end
+       end] ++
+      [fun(Conf) -> case AuthConfig of
+                        undefined -> Conf;
+                        _         -> merge_app_env(AuthConfig, Conf)
+                    end
+       end] ++
+      rabbit_ct_broker_helpers:setup_steps() ++
+      rabbit_ct_client_helpers:setup_steps()).
 
 end_per_group(G, Config)
   when G =:= v4;
@@ -284,7 +286,8 @@ init_per_testcase(T, Config)
   when T =:= will_queue_create_permission_queue_read;
        T =:= will_queue_create_permission_exchange_write;
        T =:= will_queue_publish_permission_exchange_write;
-       T =:= will_queue_publish_permission_topic_write ->
+       T =:= will_queue_publish_permission_topic_write;
+       T =:= will_queue_delete_permission ->
     case ?config(mqtt_version, Config) of
         v4 -> {skip, "Will Delay Interval is an MQTT 5.0 feature"};
         v5 -> testcase_started(Config, T)
@@ -414,7 +417,6 @@ anonymous_auth_success(Config) ->
 anonymous_auth_failure(Config) ->
     expect_authentication_failure(fun connect_anonymous/1, Config).
 
-
 ssl_user_auth_success(Config) ->
     expect_successful_connection(fun connect_ssl/1, Config).
 
@@ -507,7 +509,8 @@ connect_ssl(Config) ->
     CertsDir = ?config(rmq_certsdir, Config),
     SSLConfig = [{cacertfile, filename:join([CertsDir, "testca", "cacert.pem"])},
                  {certfile, filename:join([CertsDir, "client", "cert.pem"])},
-                 {keyfile, filename:join([CertsDir, "client", "key.pem"])}],
+                 {keyfile, filename:join([CertsDir, "client", "key.pem"])},
+                 {server_name_indication, "localhost"}],
     P = rabbit_ct_broker_helpers:get_node_config(Config, 0, tcp_port_mqtt_tls),
     emqtt:start_link([{host, "localhost"},
                       {port, P},
@@ -527,8 +530,8 @@ client_id_propagation(Config) ->
                   rpc(Config, 0, rabbit_auth_backend_mqtt_mock, setup, [Self])
           end),
     %% the setup process will notify us
-    receive
-        ok -> ok
+    SetupProcess = receive
+        {ok, SP} -> SP
     after
         3000 -> ct:fail("timeout waiting for rabbit_auth_backend_mqtt_mock:setup/1")
     end,
@@ -562,7 +565,11 @@ client_id_propagation(Config) ->
     VariableMap = maps:get(variable_map, TopicContext),
     ?assertEqual(ClientId, maps:get(<<"client_id">>, VariableMap)),
 
-    ok = emqtt:disconnect(C).
+    ok = emqtt:disconnect(C),
+
+    SetupProcess ! stop,
+
+    ok.
 
 %% These tests try to cover all operations that are listed in the
 %% table in https://www.rabbitmq.com/access-control.html#authorisation
@@ -982,6 +989,12 @@ loopback_user_connects_from_remote_host(Config) ->
     true = rpc(Config, 0, meck, validate, [Mod]),
     ok = rpc(Config, 0, meck, unload, [Mod]).
 
+%% No specific configure, write, or read permissions should be required for only connecting.
+connect_permission(Config) ->
+    set_permissions("", "", "", Config),
+    C = open_mqtt_connection(Config),
+    ok = emqtt:disconnect(C).
+
 set_topic_permissions(WritePat, ReadPat, Config) ->
     rpc(Config, 0,
         rabbit_auth_backend_internal, set_topic_permissions,
@@ -1092,7 +1105,8 @@ vhost_connection_limit(Config) ->
     unlink(C3),
     ?assertMatch({error, {ExpectedError, _}}, emqtt:connect(C3)),
     ok = emqtt:disconnect(C1),
-    ok = emqtt:disconnect(C2).
+    ok = emqtt:disconnect(C2),
+    ok = rabbit_ct_broker_helpers:clear_vhost_limit(Config, 0, <<"/">>).
 
 vhost_queue_limit(Config) ->
     ok = rabbit_ct_broker_helpers:set_vhost_limit(Config, 0, <<"/">>, max_queues, 1),
@@ -1105,7 +1119,8 @@ vhost_queue_limit(Config) ->
                  emqtt:subscribe(C, [{<<"topic1">>, qos0},
                                      {<<"topic2">>, qos1},
                                      {<<"topic3">>, qos1}])),
-    ok = assert_connection_closed(C).
+    ok = assert_connection_closed(C),
+    ok = rabbit_ct_broker_helpers:clear_vhost_limit(Config, 0, <<"/">>).
 
 user_connection_limit(Config) ->
     DefaultUser = <<"guest">>,

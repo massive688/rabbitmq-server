@@ -33,7 +33,6 @@ amqp10_client:
 - amqp10_client_app
 - amqp10_client_connection
 - amqp10_client_connection_sup
-- amqp10_client_connections_sup
 - amqp10_client_frame_reader
 - amqp10_client_session
 - amqp10_client_sessions_sup
@@ -45,8 +44,8 @@ amqp10_common:
 - amqp10_binary_parser
 - amqp10_framing
 - amqp10_framing0
-app:
-- appup_src
+- amqp10_util
+- serial_number
 aten:
 - aten
 - aten_app
@@ -57,15 +56,6 @@ aten:
 - aten_sup
 base64url:
 - base64url
-bazdep:
-- bazdep
-certifi:
-- certifi
-- certifi_pt
-codepath:
-- codepath
-cover:
-- foo
 cowboy:
 - cowboy
 - cowboy_app
@@ -75,6 +65,7 @@ cowboy:
 - cowboy_clock
 - cowboy_compress_h
 - cowboy_constraints
+- cowboy_decompress_h
 - cowboy_handler
 - cowboy_http
 - cowboy_http2
@@ -122,8 +113,6 @@ credentials_obfuscation:
 ct_helper:
 - ct_helper
 - ct_helper_error_h
-cth_styledout:
-- cth_styledout
 cuttlefish:
 - conf_parse
 - cuttlefish
@@ -148,40 +137,36 @@ cuttlefish:
 - cuttlefish_validator
 - cuttlefish_variable
 - cuttlefish_vmargs
-dummy:
-- dummy_app
-- dummy_server
-- dummy_sup
 eetcd:
-- eetcd_auth_gen
-- eetcd_cluster_gen
-- eetcd_election_gen
-- eetcd_health_gen
-- eetcd_kv_gen
-- eetcd_lease_gen
-- eetcd_lock_gen
-- eetcd_maintenance_gen
-- eetcd_watch_gen
+- auth_pb
 - eetcd
 - eetcd_app
 - eetcd_auth
+- eetcd_auth_gen
 - eetcd_cluster
+- eetcd_cluster_gen
 - eetcd_compare
 - eetcd_conn
 - eetcd_conn_sup
 - eetcd_data_coercion
 - eetcd_election
+- eetcd_election_gen
 - eetcd_grpc
+- eetcd_health_gen
 - eetcd_kv
+- eetcd_kv_gen
 - eetcd_lease
+- eetcd_lease_gen
 - eetcd_lease_sup
 - eetcd_lock
+- eetcd_lock_gen
 - eetcd_maintenance
+- eetcd_maintenance_gen
 - eetcd_op
 - eetcd_stream
 - eetcd_sup
 - eetcd_watch
-- auth_pb
+- eetcd_watch_gen
 - gogo_pb
 - health_pb
 - kv_pb
@@ -200,30 +185,13 @@ emqtt:
 - emqtt_ws
 enough:
 - enough
-erlc:
-- first_erl
-- foo
-- foo_app
-- foo_test_worker
-- foo_worker
-eunit:
-- foo
-eunit_surefire:
-- foo
-foo:
-- java
-- lisp
-- pascal
-- perl
-foodep:
-- foodep
+eunit_formatters:
+- binomial_heap
+- eunit_progress
 gen_batch_server:
 - gen_batch_server
 getopt:
 - getopt
-gpb:
-- gpb
-- gpb_compile
 gun:
 - gun
 - gun_app
@@ -237,45 +205,12 @@ gun:
 - gun_tls
 - gun_ws
 - gun_ws_h
-hackney:
-- hackney
-- hackney_app
-- hackney_bstr
-- hackney_connect
-- hackney_connection
-- hackney_connections
-- hackney_cookie
-- hackney_date
-- hackney_headers
-- hackney_headers_new
-- hackney_http
-- hackney_http_connect
-- hackney_local_tcp
-- hackney_manager
-- hackney_metrics
-- hackney_multipart
-- hackney_pool
-- hackney_pool_handler
-- hackney_request
-- hackney_response
-- hackney_socks5
-- hackney_ssl
-- hackney_ssl_certificate
-- hackney_stream
-- hackney_sup
-- hackney_tcp
-- hackney_trace
-- hackney_url
-- hackney_util
-idna:
-- idna
-- idna_bidi
-- idna_context
-- idna_data
-- idna_mapping
-- idna_table
-- idna_ucs
-- punycode
+horus:
+- horus
+- horus_cover
+- horus_utils
+host_triple:
+- host_triple
 inet_tcp_proxy_dist:
 - inet_tcp_proxy_dist
 - inet_tcp_proxy_dist_app
@@ -283,11 +218,10 @@ inet_tcp_proxy_dist:
 - inet_tcp_proxy_dist_controller
 - inet_tcp_proxy_dist_sup
 jose:
-- jose_base
-- jose_base64
-- jose_base64url
 - jose
 - jose_app
+- jose_base64
+- jose_base64url
 - jose_block_encryptor
 - jose_chacha20_poly1305
 - jose_chacha20_poly1305_crypto
@@ -295,23 +229,16 @@ jose:
 - jose_chacha20_poly1305_unsupported
 - jose_crypto_compat
 - jose_curve25519
+- jose_curve25519_crypto
+- jose_curve25519_fallback
 - jose_curve25519_libdecaf
 - jose_curve25519_libsodium
 - jose_curve25519_unsupported
 - jose_curve448
+- jose_curve448_crypto
+- jose_curve448_fallback
 - jose_curve448_libdecaf
 - jose_curve448_unsupported
-- jose_public_key
-- jose_server
-- jose_sha3
-- jose_sha3_keccakf1600_driver
-- jose_sha3_keccakf1600_nif
-- jose_sha3_libdecaf
-- jose_sha3_unsupported
-- jose_sup
-- jose_xchacha20_poly1305
-- jose_xchacha20_poly1305_crypto
-- jose_xchacha20_poly1305_unsupported
 - jose_json
 - jose_json_jason
 - jose_json_jiffy
@@ -354,6 +281,7 @@ jose:
 - jose_jwe_alg_dir
 - jose_jwe_alg_ecdh_1pu
 - jose_jwe_alg_ecdh_es
+- jose_jwe_alg_ecdh_ss
 - jose_jwe_alg_pbes2
 - jose_jwe_alg_rsa
 - jose_jwe_alg_xc20p_kw
@@ -390,6 +318,58 @@ jose:
 - jose_jws_alg_rsa_pkcs1_v1_5
 - jose_jws_alg_rsa_pss
 - jose_jwt
+- jose_public_key
+- jose_server
+- jose_sha3
+- jose_sha3_keccakf1600_driver
+- jose_sha3_keccakf1600_nif
+- jose_sha3_libdecaf
+- jose_sha3_unsupported
+- jose_sup
+- jose_xchacha20_poly1305
+- jose_xchacha20_poly1305_crypto
+- jose_xchacha20_poly1305_libsodium
+- jose_xchacha20_poly1305_unsupported
+katana_code:
+- ktn_code
+- ktn_dodger
+- ktn_io_string
+khepri:
+- khepri
+- khepri_adv
+- khepri_app
+- khepri_cluster
+- khepri_condition
+- khepri_event_handler
+- khepri_evf
+- khepri_export_erlang
+- khepri_import_export
+- khepri_machine
+- khepri_machine_v0
+- khepri_path
+- khepri_pattern_tree
+- khepri_payload
+- khepri_projection
+- khepri_sproc
+- khepri_sup
+- khepri_tree
+- khepri_tx
+- khepri_tx_adv
+- khepri_utils
+khepri_mnesia_migration:
+- khepri_mnesia_migration_app
+- khepri_mnesia_migration_sup
+- kmm_utils
+- m2k_cluster_sync
+- m2k_cluster_sync_sup
+- m2k_export
+- m2k_subscriber
+- m2k_table_copy
+- m2k_table_copy_sup
+- m2k_table_copy_sup_sup
+- mnesia_to_khepri
+- mnesia_to_khepri_converter
+- mnesia_to_khepri_example_converter
 meck:
 - meck
 - meck_args_matcher
@@ -402,18 +382,11 @@ meck:
 - meck_proc
 - meck_ret_spec
 - meck_util
-metrics:
-- metrics
-- metrics_dummy
-- metrics_exometer
-- metrics_folsom
-mimerl:
-- mimerl
 my_plugin:
 - my_plugin
-neotoma:
-- neotoma
-- neotoma_parse
+oauth2_client:
+- jwt_helper
+- oauth2_client
 observer_cli:
 - observer_cli
 - observer_cli_application
@@ -432,6 +405,7 @@ osiris:
 - osiris
 - osiris_app
 - osiris_bench
+- osiris_bloom
 - osiris_counters
 - osiris_ets
 - osiris_log
@@ -445,44 +419,37 @@ osiris:
 - osiris_tracking
 - osiris_util
 - osiris_writer
-parse_trans:
-- ct_expand
-- exprecs
-- parse_trans
-- parse_trans_codegen
-- parse_trans_mod
-- parse_trans_pp
 prometheus:
+- prometheus
+- prometheus_boolean
+- prometheus_buckets
+- prometheus_collector
+- prometheus_counter
+- prometheus_format
+- prometheus_gauge
+- prometheus_histogram
+- prometheus_http
+- prometheus_instrumenter
+- prometheus_metric
+- prometheus_metric_spec
+- prometheus_misc
+- prometheus_mnesia
 - prometheus_mnesia_collector
+- prometheus_model
+- prometheus_model_helpers
+- prometheus_protobuf_format
+- prometheus_quantile_summary
+- prometheus_registry
+- prometheus_summary
+- prometheus_sup
+- prometheus_test_instrumenter
+- prometheus_text_format
+- prometheus_time
 - prometheus_vm_dist_collector
 - prometheus_vm_memory_collector
 - prometheus_vm_msacc_collector
 - prometheus_vm_statistics_collector
 - prometheus_vm_system_info_collector
-- prometheus_http
-- prometheus_mnesia
-- prometheus_test_instrumenter
-- prometheus_protobuf_format
-- prometheus_text_format
-- prometheus_boolean
-- prometheus_counter
-- prometheus_gauge
-- prometheus_histogram
-- prometheus_quantile_summary
-- prometheus_summary
-- prometheus_model
-- prometheus_model_helpers
-- prometheus
-- prometheus_buckets
-- prometheus_collector
-- prometheus_format
-- prometheus_instrumenter
-- prometheus_metric
-- prometheus_metric_spec
-- prometheus_misc
-- prometheus_registry
-- prometheus_sup
-- prometheus_time
 proper:
 - proper
 - proper_arith
@@ -510,29 +477,20 @@ proper:
 - proper_unicode
 - proper_unused_imports_remover
 - vararg
-proto_gpb:
-- foo
-- foo_app
-- foo_sup
-proto_protobuffs:
-- foo
-- foo_app
-- foo_sup
-protobuffs:
-- protobuffs
-- protobuffs_compile
 quantile_estimator:
 - quantile
 - quantile_estimator
 ra:
 - ra
 - ra_app
+- ra_aux
 - ra_bench
 - ra_counters
 - ra_dbg
 - ra_directory
 - ra_env
 - ra_ets_queue
+- ra_file
 - ra_file_handle
 - ra_flru
 - ra_leaderboard
@@ -561,6 +519,7 @@ ra:
 - ra_snapshot
 - ra_sup
 - ra_system
+- ra_system_recover
 - ra_system_sup
 - ra_systems_sup
 rabbit:
@@ -583,6 +542,13 @@ rabbit:
 - rabbit
 - rabbit_access_control
 - rabbit_alarm
+- rabbit_amqp1_0
+- rabbit_amqp_management
+- rabbit_amqp_reader
+- rabbit_amqp_session
+- rabbit_amqp_session_sup
+- rabbit_amqp_util
+- rabbit_amqp_writer
 - rabbit_amqqueue
 - rabbit_amqqueue_control
 - rabbit_amqqueue_process
@@ -590,6 +556,7 @@ rabbit:
 - rabbit_amqqueue_sup_sup
 - rabbit_auth_backend_internal
 - rabbit_auth_mechanism_amqplain
+- rabbit_auth_mechanism_anonymous
 - rabbit_auth_mechanism_cr_demo
 - rabbit_auth_mechanism_plain
 - rabbit_autoheal
@@ -624,22 +591,32 @@ rabbit:
 - rabbit_cuttlefish
 - rabbit_db
 - rabbit_db_binding
+- rabbit_db_binding_m2k_converter
 - rabbit_db_cluster
 - rabbit_db_exchange
+- rabbit_db_exchange_m2k_converter
+- rabbit_db_m2k_converter
 - rabbit_db_maintenance
+- rabbit_db_maintenance_m2k_converter
 - rabbit_db_msup
+- rabbit_db_msup_m2k_converter
 - rabbit_db_policy
 - rabbit_db_queue
+- rabbit_db_queue_m2k_converter
 - rabbit_db_rtparams
+- rabbit_db_rtparams_m2k_converter
 - rabbit_db_topic_exchange
 - rabbit_db_user
+- rabbit_db_user_m2k_converter
 - rabbit_db_vhost
 - rabbit_db_vhost_defaults
+- rabbit_db_vhost_m2k_converter
 - rabbit_dead_letter
 - rabbit_definitions
 - rabbit_definitions_hashing
 - rabbit_definitions_import_https
 - rabbit_definitions_import_local_filesystem
+- rabbit_depr_ff_extra
 - rabbit_deprecated_features
 - rabbit_diagnostics
 - rabbit_direct
@@ -655,6 +632,7 @@ rabbit:
 - rabbit_exchange_type_fanout
 - rabbit_exchange_type_headers
 - rabbit_exchange_type_invalid
+- rabbit_exchange_type_local_random
 - rabbit_exchange_type_topic
 - rabbit_feature_flags
 - rabbit_ff_controller
@@ -670,12 +648,15 @@ rabbit:
 - rabbit_fifo_dlx_sup
 - rabbit_fifo_dlx_worker
 - rabbit_fifo_index
+- rabbit_fifo_q
 - rabbit_fifo_v0
 - rabbit_fifo_v1
+- rabbit_fifo_v3
 - rabbit_file
 - rabbit_global_counters
 - rabbit_guid
 - rabbit_health_check
+- rabbit_khepri
 - rabbit_limiter
 - rabbit_log_channel
 - rabbit_log_connection
@@ -684,26 +665,12 @@ rabbit:
 - rabbit_log_queue
 - rabbit_log_tail
 - rabbit_logger_exchange_h
-- rabbit_looking_glass
 - rabbit_maintenance
-- rabbit_memory_monitor
 - rabbit_message_interceptor
 - rabbit_metrics
-- rabbit_mirror_queue_coordinator
-- rabbit_mirror_queue_master
 - rabbit_mirror_queue_misc
-- rabbit_mirror_queue_mode
-- rabbit_mirror_queue_mode_all
-- rabbit_mirror_queue_mode_exactly
-- rabbit_mirror_queue_mode_nodes
-- rabbit_mirror_queue_slave
-- rabbit_mirror_queue_sync
 - rabbit_mnesia
-- rabbit_mnesia_rename
-- rabbit_msg_file
-- rabbit_msg_record
 - rabbit_msg_store
-- rabbit_msg_store_ets_index
 - rabbit_msg_store_gc
 - rabbit_networking
 - rabbit_networking_store
@@ -725,19 +692,12 @@ rabbit:
 - rabbit_prelaunch_enabled_plugins_file
 - rabbit_prelaunch_feature_flags
 - rabbit_prelaunch_logging
-- rabbit_prequeue
 - rabbit_priority_queue
 - rabbit_process
 - rabbit_queue_consumers
 - rabbit_queue_decorator
 - rabbit_queue_index
 - rabbit_queue_location
-- rabbit_queue_location_client_local
-- rabbit_queue_location_min_masters
-- rabbit_queue_location_random
-- rabbit_queue_location_validator
-- rabbit_queue_master_location_misc
-- rabbit_queue_master_locator
 - rabbit_queue_type
 - rabbit_queue_type_util
 - rabbit_quorum_memory_manager
@@ -764,6 +724,7 @@ rabbit:
 - rabbit_tracking
 - rabbit_tracking_store
 - rabbit_upgrade_preparation
+- rabbit_uri
 - rabbit_variable_queue
 - rabbit_version
 - rabbit_vhost
@@ -773,6 +734,7 @@ rabbit:
 - rabbit_vhost_sup
 - rabbit_vhost_sup_sup
 - rabbit_vhost_sup_wrapper
+- rabbit_vhosts
 - rabbit_vm
 - supervised_lifecycle
 - tcp_listener
@@ -786,7 +748,6 @@ rabbit_common:
 - delegate
 - delegate_sup
 - file_handle_cache
-- file_handle_cache_stats
 - gen_server2
 - mirrored_supervisor_locks
 - mnesia_sync
@@ -819,7 +780,6 @@ rabbit_common:
 - rabbit_json
 - rabbit_log
 - rabbit_misc
-- rabbit_msg_store_index
 - rabbit_net
 - rabbit_nodes_common
 - rabbit_numerical
@@ -835,6 +795,7 @@ rabbit_common:
 - rabbit_registry
 - rabbit_registry_class
 - rabbit_resource_monitor_misc
+- rabbit_routing_parser
 - rabbit_runtime
 - rabbit_runtime_parameter
 - rabbit_semver
@@ -847,21 +808,11 @@ rabbit_common:
 - worker_pool
 - worker_pool_sup
 - worker_pool_worker
+rabbitmq_amqp_client:
+- rabbitmq_amqp_address
+- rabbitmq_amqp_client
 rabbitmq_amqp1_0:
-- Elixir.RabbitMQ.CLI.Ctl.Commands.ListAmqp10ConnectionsCommand
-- rabbit_amqp1_0
-- rabbit_amqp1_0_channel
-- rabbit_amqp1_0_incoming_link
-- rabbit_amqp1_0_link_util
-- rabbit_amqp1_0_message
-- rabbit_amqp1_0_outgoing_link
-- rabbit_amqp1_0_reader
-- rabbit_amqp1_0_session
-- rabbit_amqp1_0_session_process
-- rabbit_amqp1_0_session_sup
-- rabbit_amqp1_0_session_sup_sup
-- rabbit_amqp1_0_util
-- rabbit_amqp1_0_writer
+- rabbitmq_amqp1_0_noop
 rabbitmq_auth_backend_cache:
 - rabbit_auth_backend_cache
 - rabbit_auth_backend_cache_app
@@ -879,9 +830,11 @@ rabbitmq_auth_backend_ldap:
 - rabbit_auth_backend_ldap_util
 - rabbit_log_ldap
 rabbitmq_auth_backend_oauth2:
+- Elixir.RabbitMQ.CLI.Ctl.Commands.AddSigningKeyCommand
 - Elixir.RabbitMQ.CLI.Ctl.Commands.AddUaaKeyCommand
 - rabbit_auth_backend_oauth2
 - rabbit_auth_backend_oauth2_app
+- rabbit_oauth2_config
 - rabbit_oauth2_scope
 - uaa_jwks
 - uaa_jwt
@@ -903,6 +856,7 @@ rabbitmq_aws:
 rabbitmq_consistent_hash_exchange:
 - Elixir.RabbitMQ.CLI.Diagnostics.Commands.ConsistentHashExchangeRingStateCommand
 - rabbit_db_ch_exchange
+- rabbit_db_ch_exchange_m2k_converter
 - rabbit_exchange_type_consistent_hash
 rabbitmq_ct_client_helpers:
 - rabbit_ct_client_helpers
@@ -942,8 +896,13 @@ rabbitmq_federation:
 - rabbit_log_federation
 rabbitmq_federation_management:
 - rabbit_federation_mgmt
+rabbitmq_federation_prometheus:
+- rabbit_federation_prometheus_app
+- rabbit_federation_prometheus_collector
+- rabbit_federation_prometheus_sup
 rabbitmq_jms_topic_exchange:
 - rabbit_db_jms_exchange
+- rabbit_db_jms_exchange_m2k_converter
 - rabbit_jms_topic_exchange
 - sjx_evaluator
 rabbitmq_management:
@@ -960,6 +919,7 @@ rabbitmq_management:
 - rabbit_mgmt_hsts
 - rabbit_mgmt_load_definitions
 - rabbit_mgmt_login
+- rabbit_mgmt_nodes
 - rabbit_mgmt_oauth_bootstrap
 - rabbit_mgmt_reset_handler
 - rabbit_mgmt_stats
@@ -982,6 +942,7 @@ rabbitmq_management:
 - rabbit_mgmt_wm_connections_vhost
 - rabbit_mgmt_wm_consumers
 - rabbit_mgmt_wm_definitions
+- rabbit_mgmt_wm_deprecated_features
 - rabbit_mgmt_wm_environment
 - rabbit_mgmt_wm_exchange
 - rabbit_mgmt_wm_exchange_publish
@@ -995,7 +956,6 @@ rabbitmq_management:
 - rabbit_mgmt_wm_health_check_alarms
 - rabbit_mgmt_wm_health_check_certificate_expiration
 - rabbit_mgmt_wm_health_check_local_alarms
-- rabbit_mgmt_wm_health_check_node_is_mirror_sync_critical
 - rabbit_mgmt_wm_health_check_node_is_quorum_critical
 - rabbit_mgmt_wm_health_check_port_listener
 - rabbit_mgmt_wm_health_check_protocol_listener
@@ -1063,14 +1023,9 @@ rabbitmq_management_agent:
 - rabbit_mgmt_metrics_gc
 - rabbit_mgmt_storage
 rabbitmq_mqtt:
-- Elixir.RabbitMQ.CLI.Ctl.Commands.DecommissionMqttNodeCommand
 - Elixir.RabbitMQ.CLI.Ctl.Commands.ListMqttConnectionsCommand
 - mc_mqtt
-- mqtt_machine
-- mqtt_machine_v0
-- mqtt_node
 - rabbit_mqtt
-- rabbit_mqtt_collector
 - rabbit_mqtt_confirms
 - rabbit_mqtt_ff
 - rabbit_mqtt_internal_event_handler
@@ -1138,6 +1093,7 @@ rabbitmq_prometheus:
 - prometheus_process_collector
 - prometheus_rabbitmq_alarm_metrics_collector
 - prometheus_rabbitmq_core_metrics_collector
+- prometheus_rabbitmq_dynamic_collector
 - prometheus_rabbitmq_global_metrics_collector
 - rabbit_prometheus_app
 - rabbit_prometheus_dispatcher
@@ -1146,6 +1102,7 @@ rabbitmq_random_exchange:
 - rabbit_exchange_type_random
 rabbitmq_recent_history_exchange:
 - rabbit_db_rh_exchange
+- rabbit_db_rh_exchange_m2k_converter
 - rabbit_exchange_type_recent_history
 rabbitmq_sharding:
 - rabbit_sharding_exchange_decorator
@@ -1174,8 +1131,13 @@ rabbitmq_shovel:
 - rabbit_shovel_worker
 - rabbit_shovel_worker_sup
 rabbitmq_shovel_management:
-- rabbit_shovel_mgmt
+- rabbit_shovel_mgmt_shovel
+- rabbit_shovel_mgmt_shovels
 - rabbit_shovel_mgmt_util
+rabbitmq_shovel_prometheus:
+- rabbit_shovel_prometheus_app
+- rabbit_shovel_prometheus_collector
+- rabbit_shovel_prometheus_sup
 rabbitmq_stomp:
 - Elixir.RabbitMQ.CLI.Ctl.Commands.ListStompConnectionsCommand
 - rabbit_stomp
@@ -1195,6 +1157,7 @@ rabbitmq_stream:
 - Elixir.RabbitMQ.CLI.Ctl.Commands.ListStreamConsumersCommand
 - Elixir.RabbitMQ.CLI.Ctl.Commands.ListStreamGroupConsumersCommand
 - Elixir.RabbitMQ.CLI.Ctl.Commands.ListStreamPublishersCommand
+- Elixir.RabbitMQ.CLI.Ctl.Commands.ListStreamTrackingCommand
 - rabbit_stream
 - rabbit_stream_connection_sup
 - rabbit_stream_manager
@@ -1215,6 +1178,7 @@ rabbitmq_stream_management:
 - rabbit_stream_management_utils
 - rabbit_stream_mgmt_db
 - rabbit_stream_publishers_mgmt
+- rabbit_stream_tracking_mgmt
 rabbitmq_top:
 - rabbit_top_app
 - rabbit_top_extension
@@ -1258,6 +1222,7 @@ rabbitmq_web_dispatch:
 - webmachine_log
 - webmachine_log_handler
 rabbitmq_web_mqtt:
+- Elixir.RabbitMQ.CLI.Ctl.Commands.ListWebMqttConnectionsCommand
 - rabbit_web_mqtt_app
 - rabbit_web_mqtt_handler
 - rabbit_web_mqtt_stream_handler
@@ -1292,51 +1257,15 @@ ranch:
 - ranch_sup
 - ranch_tcp
 - ranch_transport
-rebar:
-- rebar
-- rebar_abnfc_compiler
-- rebar_app_utils
-- rebar_appups
-- rebar_asn1_compiler
-- rebar_base_compiler
-- rebar_cleaner
-- rebar_config
-- rebar_core
-- rebar_cover_utils
-- rebar_ct
-- rebar_deps
-- rebar_dia_compiler
-- rebar_dialyzer
-- rebar_edoc
-- rebar_erlc_compiler
-- rebar_erlydtl_compiler
-- rebar_escripter
-- rebar_eunit
-- rebar_file_utils
-- rebar_getopt
-- rebar_lfe_compiler
-- rebar_log
-- rebar_metacmds
-- rebar_mustache
-- rebar_neotoma_compiler
-- rebar_otp_app
-- rebar_otp_appup
-- rebar_port_compiler
-- rebar_proto_compiler
-- rebar_proto_gpb_compiler
-- rebar_protobuffs_compiler
-- rebar_qc
-- rebar_rand_compat
-- rebar_rel_utils
-- rebar_reltool
-- rebar_require_vsn
-- rebar_shell
-- rebar_subdirs
-- rebar_templater
-- rebar_upgrade
-- rebar_utils
-- rebar_xref
-- rmemo
+rebar3_format:
+- default_formatter
+- erlfmt_formatter
+- otp_formatter
+- rebar3_ast_formatter
+- rebar3_format
+- rebar3_format_prv
+- rebar3_formatter
+- sr_formatter
 recon:
 - recon
 - recon_alloc
@@ -1356,14 +1285,6 @@ seshat:
 - seshat_app
 - seshat_counters_server
 - seshat_sup
-ssl_verify_fun:
-- ssl_verify_fingerprint
-- ssl_verify_fun_cert_helpers
-- ssl_verify_fun_encodings
-- ssl_verify_hostname
-- ssl_verify_pk
-- ssl_verify_string
-- ssl_verify_util
 stdout_formatter:
 - stdout_formatter
 - stdout_formatter_paragraph
@@ -1404,8 +1325,3 @@ trust_store_http:
 - trust_store_http_sup
 - trust_store_invalid_handler
 - trust_store_list_handler
-unicode_util_compat:
-- string_compat
-- unicode_util_compat
-unuseddep:
-- unuseddep

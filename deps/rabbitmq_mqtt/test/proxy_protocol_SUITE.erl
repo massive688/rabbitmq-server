@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2024 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 -module(proxy_protocol_SUITE).
 -compile([export_all, nowarn_export_all]).
@@ -57,9 +57,10 @@ end_per_suite(Config) ->
         rabbit_ct_broker_helpers:teardown_steps()).
 
 init_per_group(Group, Config) ->
-    Config1 = rabbit_ct_helpers:set_config(Config, {mqtt_version, Group}),
-    util:maybe_skip_v5(Config1).
-end_per_group(_, Config) -> Config.
+    rabbit_ct_helpers:set_config(Config, {mqtt_version, Group}).
+
+end_per_group(_Group, Config) ->
+    Config.
 
 init_per_testcase(Testcase, Config) ->
     rabbit_ct_helpers:testcase_started(Config, Testcase).

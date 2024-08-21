@@ -3,7 +3,7 @@
 .\" License, v. 2.0. If a copy of the MPL was not distributed with this
 .\" file, You can obtain one at https://mozilla.org/MPL/2.0/.
 .\"
-.\" Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+.\" Copyright (c) 2007-2023 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.  All rights reserved.
 .\"
 .Dd June 22, 2023
 .Dt RABBITMQ-STREAMS 8
@@ -118,6 +118,15 @@ Displays the status of a stream.
 Example:
 .Sp
 .Dl rabbitmq-streams stream_status --vhost Qo a-vhost Qc Qo a-stream Qc
+.\" ------------------------------------
+.It Cm restart_stream Ar stream Fl -vhost Ar virtual-host Fl --preferred-leader-node Ar node
+.Pp
+Restarts a stream including all of it's replicas. The optional preferred
+node flag instructs the command to try to place the leader on a specific node during the restart.
+.Pp
+Example:
+.Sp
+.Dl rabbitmq-streams restart_stream --vhost Qo a-vhost Qc Qo a-stream Qc --preferred-leader-node Qo node
 .\" ------------------------------------
 .El
 .Ss Policies
@@ -307,7 +316,7 @@ for each producer:
 .sp
 .Dl rabbitmq-streams list_stream_publishers connection_pid publisher_id stream
 .\" ------------------------------------------------------------------
-.It Cm add_super_stream Ar super-stream Oo Fl -vhost Ar vhost Oc Oo Fl -partitions Ar partitions Oc Oo Fl -routing-keys Ar routing-keys Oc Oo Fl -max-length-bytes Ar max-length-bytes Oc Oo Fl -max-age Ar max-age Oc Oo Fl -stream-max-segment-size-bytes Ar stream-max-segment-size-bytes Oc Oo Fl -leader-locator Ar leader-locator Oc Oo Fl -initial-cluster-size Ar initial-cluster-size Oc
+.It Cm add_super_stream Ar super-stream Oo Fl -vhost Ar vhost Oc Oo Fl -partitions Ar partitions Oc Oo Fl -binding-keys Ar binding-keys Oc Oo Fl -max-length-bytes Ar max-length-bytes Oc Oo Fl -max-age Ar max-age Oc Oo Fl -stream-max-segment-size-bytes Ar stream-max-segment-size-bytes Oc Oo Fl -leader-locator Ar leader-locator Oc Oo Fl -initial-cluster-size Ar initial-cluster-size Oc
 .Bl -tag -width Ds
 .It Ar super-stream
 The name of the super stream to create.
@@ -315,8 +324,8 @@ The name of the super stream to create.
 The name of the virtual host to create the super stream into.
 .It Ar partitions
 The number of partitions the super stream will have.
-.It Ar routing-keys
-Comma-separated list of routing keys.
+.It Ar binding-keys
+Comma-separated list of binding keys.
 .It Ar max-length-bytes
 The maximum size of partition streams, example values: 20gb, 500mb.
 .It Ar max-age
@@ -438,4 +447,4 @@ for each consumer attached to the stream-1 stream and belonging to the stream-1 
 .\" ------------------------------------------------------------------
 .Sh AUTHOR
 .\" ------------------------------------------------------------------
-.An The RabbitMQ Team Aq Mt rabbitmq-core@groups.vmware.com
+.An The RabbitMQ Team Aq Mt contact-tanzu-data.pdl@broadcom.com

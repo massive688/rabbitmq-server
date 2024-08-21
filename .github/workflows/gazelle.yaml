@@ -9,18 +9,23 @@ on:
 jobs:
   bazel-run-gazelle:
     name: bazel run gazelle
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
     - name: CHECKOUT REPOSITORY
       uses: actions/checkout@v4
       with:
         ref: ${{ github.event.inputs.target_branch }}
+    - name: Configure Erlang
+      uses: erlef/setup-beam@v1
+      with:
+        otp-version: 26.2
+        elixir-version: 1.15
     - name: BAZEL RUN GAZELLE
       run: |
         bazel run gazelle
     - name: CREATE PULL REQUEST
-      uses: peter-evans/create-pull-request@v5.0.2
+      uses: peter-evans/create-pull-request@v6.1.0
       with:
         token: ${{ secrets.REPO_SCOPED_TOKEN }}
         committer: GitHub <noreply@github.com>

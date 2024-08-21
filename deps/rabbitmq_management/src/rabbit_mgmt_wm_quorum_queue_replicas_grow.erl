@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2024 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 -module(rabbit_mgmt_wm_quorum_queue_replicas_grow).
 
@@ -11,8 +11,6 @@
 -export([variances/2]).
 
 -include_lib("rabbitmq_management_agent/include/rabbit_mgmt_records.hrl").
--include_lib("rabbit_common/include/rabbit.hrl").
-
 -define(TIMEOUT, 30_000).
 
 init(Req, _State) ->
@@ -39,12 +37,14 @@ accept_content(ReqData, Context) ->
   NewReplicaNode = rabbit_mgmt_util:id(node, ReqData),
   rabbit_mgmt_util:with_decode(
     [vhost_pattern, queue_pattern, strategy], ReqData, Context,
-    fun([VHPattern, QPattern, Strategy], _Body, _ReqData) ->
+    fun([VHPattern, QPattern, Strategy], Body, _ReqData) ->
+      Membership = maps:get(<<"membership">>, Body, promotable),
       rabbit_quorum_queue:grow(
         rabbit_data_coercion:to_atom(NewReplicaNode),
         VHPattern,
         QPattern,
-        rabbit_data_coercion:to_atom(Strategy))
+        rabbit_data_coercion:to_atom(Strategy),
+        rabbit_data_coercion:to_atom(Membership))
     end),
   {true, ReqData, Context}.
 

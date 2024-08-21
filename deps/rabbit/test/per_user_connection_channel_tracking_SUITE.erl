@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2020-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2024 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(per_user_connection_channel_tracking_SUITE).
@@ -12,16 +12,14 @@
 -include_lib("eunit/include/eunit.hrl").
 -include_lib("rabbitmq_ct_helpers/include/rabbit_assert.hrl").
 
+-compile(nowarn_export_all).
 -compile(export_all).
 
 -define(A_TOUT, 20000).
 
 all() ->
     [
-     {group, cluster_size_1_network},
-     {group, cluster_size_2_network},
-     {group, cluster_size_1_direct},
-     {group, cluster_size_2_direct}
+     {group, tests}
     ].
 
 groups() ->
@@ -31,17 +29,19 @@ groups() ->
         single_node_vhost_down_mimic,
         single_node_vhost_deletion
     ],
-    ClusterSize2Tests = [
+    ClusterSize3Tests = [
         cluster_user_deletion,
         cluster_vhost_down_mimic,
         cluster_vhost_deletion,
         cluster_node_removed
     ],
     [
-      {cluster_size_1_network, [], ClusterSize1Tests},
-      {cluster_size_2_network, [], ClusterSize2Tests},
-      {cluster_size_1_direct, [], ClusterSize1Tests},
-      {cluster_size_2_direct, [], ClusterSize2Tests}
+     {tests, [], [
+                  {cluster_size_1_network, [], ClusterSize1Tests},
+                  {cluster_size_3_network, [], ClusterSize3Tests},
+                  {cluster_size_1_direct, [], ClusterSize1Tests},
+                  {cluster_size_3_direct, [], ClusterSize3Tests}
+                 ]}
     ].
 
 suite() ->
@@ -64,15 +64,17 @@ end_per_suite(Config) ->
 init_per_group(cluster_size_1_network, Config) ->
     Config1 = rabbit_ct_helpers:set_config(Config, [{connection_type, network}]),
     init_per_multinode_group(cluster_size_1_network, Config1, 1);
-init_per_group(cluster_size_2_network, Config) ->
+init_per_group(cluster_size_3_network, Config) ->
     Config1 = rabbit_ct_helpers:set_config(Config, [{connection_type, network}]),
-    init_per_multinode_group(cluster_size_2_network, Config1, 2);
+    init_per_multinode_group(cluster_size_3_network, Config1, 3);
 init_per_group(cluster_size_1_direct, Config) ->
     Config1 = rabbit_ct_helpers:set_config(Config, [{connection_type, direct}]),
     init_per_multinode_group(cluster_size_1_direct, Config1, 1);
-init_per_group(cluster_size_2_direct, Config) ->
+init_per_group(cluster_size_3_direct, Config) ->
     Config1 = rabbit_ct_helpers:set_config(Config, [{connection_type, direct}]),
-    init_per_multinode_group(cluster_size_2_direct, Config1, 2).
+    init_per_multinode_group(cluster_size_3_direct, Config1, 3);
+init_per_group(_Group, Config) ->
+    Config.
 
 init_per_multinode_group(_Group, Config, NodeCount) ->
     Suffix = rabbit_ct_helpers:testcase_absname(Config, "", "-"),
@@ -84,6 +86,9 @@ init_per_multinode_group(_Group, Config, NodeCount) ->
       Config1, rabbit_ct_broker_helpers:setup_steps() ++
       rabbit_ct_client_helpers:setup_steps()).
 
+end_per_group(tests, Config) ->
+    % The broker is managed by {init,end}_per_testcase().
+    Config;
 end_per_group(_Group, Config) ->
     rabbit_ct_helpers:run_steps(Config,
       rabbit_ct_client_helpers:teardown_steps() ++

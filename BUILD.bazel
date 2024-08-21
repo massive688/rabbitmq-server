@@ -1,7 +1,6 @@
 load(
     "@bazel_skylib//rules:common_settings.bzl",
     "bool_flag",
-    "string_flag",
 )
 load("@rules_pkg//pkg:mappings.bzl", "pkg_files")
 load("@bazel_gazelle//:def.bzl", "gazelle")
@@ -11,7 +10,7 @@ load("@rules_erlang//:dialyze.bzl", "DEFAULT_PLT_APPS", "plt")
 load("@rules_erlang//:shell.bzl", "shell")
 load("@rules_erlang//:erl_eval.bzl", "erl_eval")
 load("@rules_erlang//gazelle:moduleindex.bzl", "moduleindex")
-load("//bazel/elixir:iex_eval.bzl", "iex_eval")
+load("@rules_elixir//:iex_eval.bzl", "iex_eval")
 load(":rabbitmq_home.bzl", "rabbitmq_home")
 load(":rabbitmq_run.bzl", "rabbitmq_run", "rabbitmq_run_command")
 load(":rabbitmqctl.bzl", "rabbitmqctl")
@@ -124,12 +123,6 @@ config_setting(
     },
 )
 
-string_flag(
-    name = "elixir_home",
-    build_setting_default = "",
-    visibility = ["//visibility:public"],
-)
-
 plt(
     name = "base_plt",
     apps = DEFAULT_PLT_APPS + [
@@ -141,10 +134,7 @@ plt(
 
 PLUGINS = all_plugins(
     rabbitmq_workspace = "",
-) + select({
-    "@rules_erlang//:debug_build": ["@looking_glass//:erlang_app"],
-    "//conditions:default": [],
-})
+)
 
 rabbitmq_home(
     name = "broker-home",
@@ -157,7 +147,7 @@ rabbitmq_run(
     visibility = ["//visibility:public"],
 )
 
-# Allow us to `bazel run broker`
+# Allows us to `bazel run broker`
 # for the equivalent of `make run-broker`
 rabbitmq_run_command(
     name = "broker",
@@ -165,7 +155,23 @@ rabbitmq_run_command(
     subcommand = "run-broker",
 )
 
-# Allow us to `bazel run start-cluster`
+# Allows us to `bazel run background-broker`
+# to start a broker in the background
+rabbitmq_run_command(
+    name = "background-broker",
+    rabbitmq_run = ":rabbitmq-run",
+    subcommand = "start-background-broker",
+)
+
+# Allows us to `bazel run stop-broker`
+# Useful is broker started in the background
+rabbitmq_run_command(
+    name = "stop-broker",
+    rabbitmq_run = ":rabbitmq-run",
+    subcommand = "stop-node",
+)
+
+# Allows us to `bazel run start-cluster`
 # for the equivalent of `make start-cluster`
 rabbitmq_run_command(
     name = "start-cluster",
@@ -173,7 +179,7 @@ rabbitmq_run_command(
     subcommand = "start-cluster",
 )
 
-# Allow us to `bazel run stop-cluster`
+# Allows us to `bazel run stop-cluster`
 # for the equivalent of `make stop-cluster`
 rabbitmq_run_command(
     name = "stop-cluster",
@@ -222,12 +228,14 @@ erl_eval(
     name = "otp_version",
     outs = ["otp_version.txt"],
     expression = """{ok, Version} = file:read_file(filename:join([code:root_dir(), "releases", erlang:system_info(otp_release), "OTP_VERSION"])), file:write_file(os:getenv("OUTS"), Version), halt().""",
+    visibility = ["//visibility:public"],
 )
 
 iex_eval(
     name = "elixir_version",
     outs = ["elixir_version.txt"],
     expression = """File.write!(System.get_env("OUTS"), System.version()); System.halt()""",
+    visibility = ["//visibility:public"],
 )
 
 filegroup(

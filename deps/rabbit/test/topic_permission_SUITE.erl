@@ -2,12 +2,11 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2011-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2024 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(topic_permission_SUITE).
 
--include_lib("common_test/include/ct.hrl").
 -include_lib("rabbit_common/include/rabbit.hrl").
 
 -compile(export_all).
@@ -58,16 +57,14 @@ topic_permission_database_access(Config) ->
         ?MODULE, topic_permission_database_access1, [Config]).
 
 topic_permission_database_access1(_Config) ->
-    0 = length(ets:tab2list(rabbit_topic_permission)),
     rabbit_vhost:add(<<"/">>, <<"acting-user">>),
     rabbit_vhost:add(<<"other-vhost">>, <<"acting-user">>),
     rabbit_auth_backend_internal:add_user(<<"guest">>, <<"guest">>, <<"acting-user">>),
     rabbit_auth_backend_internal:add_user(<<"dummy">>, <<"dummy">>, <<"acting-user">>),
 
-    rabbit_auth_backend_internal:set_topic_permissions(
-        <<"guest">>, <<"/">>, <<"amq.topic">>, "^a", "^a", <<"acting-user">>
-    ),
-    1 = length(ets:tab2list(rabbit_topic_permission)),
+    ok = rabbit_auth_backend_internal:set_topic_permissions(
+           <<"guest">>, <<"/">>, <<"amq.topic">>, "^a", "^a", <<"acting-user">>
+          ),
     1 = length(rabbit_auth_backend_internal:list_user_topic_permissions(<<"guest">>)),
     0 = length(rabbit_auth_backend_internal:list_user_topic_permissions(<<"dummy">>)),
     1 = length(rabbit_auth_backend_internal:list_vhost_topic_permissions(<<"/">>)),
@@ -79,7 +76,6 @@ topic_permission_database_access1(_Config) ->
     rabbit_auth_backend_internal:set_topic_permissions(
         <<"guest">>, <<"other-vhost">>, <<"amq.topic">>, ".*", ".*", <<"acting-user">>
     ),
-    2 = length(ets:tab2list(rabbit_topic_permission)),
     2 = length(rabbit_auth_backend_internal:list_user_topic_permissions(<<"guest">>)),
     0 = length(rabbit_auth_backend_internal:list_user_topic_permissions(<<"dummy">>)),
     1 = length(rabbit_auth_backend_internal:list_vhost_topic_permissions(<<"/">>)),
@@ -142,16 +138,15 @@ topic_permission_checks(Config) ->
         ?MODULE, topic_permission_checks1, [Config]).
 
 topic_permission_checks1(_Config) ->
-    0 = length(ets:tab2list(rabbit_topic_permission)),
-    rabbit_db_vhost:create_or_get(<<"/">>, [], #{}),
-    rabbit_db_vhost:create_or_get(<<"other-vhost">>, [], #{}),
+    rabbit_vhost:add(<<"/">>, <<"">>),
+    rabbit_vhost:add(<<"other-vhost">>, <<"">>),
+
     rabbit_auth_backend_internal:add_user(<<"guest">>, <<"guest">>, <<"acting-user">>),
     rabbit_auth_backend_internal:add_user(<<"dummy">>, <<"dummy">>, <<"acting-user">>),
 
     rabbit_auth_backend_internal:set_topic_permissions(
         <<"guest">>, <<"/">>, <<"amq.topic">>, "^a", "^a", <<"acting-user">>
     ),
-    1 = length(ets:tab2list(rabbit_topic_permission)),
     1 = length(rabbit_auth_backend_internal:list_user_topic_permissions(<<"guest">>)),
     0 = length(rabbit_auth_backend_internal:list_user_topic_permissions(<<"dummy">>)),
     1 = length(rabbit_auth_backend_internal:list_vhost_topic_permissions(<<"/">>)),
@@ -160,7 +155,6 @@ topic_permission_checks1(_Config) ->
     rabbit_auth_backend_internal:set_topic_permissions(
         <<"guest">>, <<"other-vhost">>, <<"amq.topic">>, ".*", ".*", <<"acting-user">>
     ),
-    2 = length(ets:tab2list(rabbit_topic_permission)),
     2 = length(rabbit_auth_backend_internal:list_user_topic_permissions(<<"guest">>)),
     0 = length(rabbit_auth_backend_internal:list_user_topic_permissions(<<"dummy">>)),
     1 = length(rabbit_auth_backend_internal:list_vhost_topic_permissions(<<"/">>)),

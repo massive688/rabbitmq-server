@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2024 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_mqtt_reader).
@@ -71,34 +71,39 @@ close_connection(Pid, Reason) ->
 init(Ref) ->
     process_flag(trap_exit, true),
     logger:set_process_metadata(#{domain => ?RMQLOG_DOMAIN_CONN ++ [mqtt]}),
-    {ok, Sock} = rabbit_networking:handshake(Ref,
-        application:get_env(?APP_NAME, proxy_protocol, false)),
-    RealSocket = rabbit_net:unwrap_socket(Sock),
-    case rabbit_net:connection_string(Sock, inbound) of
-        {ok, ConnStr} ->
-            ConnName = rabbit_data_coercion:to_binary(ConnStr),
-            ?LOG_DEBUG("MQTT accepting TCP connection ~tp (~ts)", [self(), ConnName]),
-            _ = rabbit_alarm:register(self(), {?MODULE, conserve_resources, []}),
-            LoginTimeout = application:get_env(?APP_NAME, login_timeout, 10_000),
-            erlang:send_after(LoginTimeout, self(), login_timeout),
-            State0 = #state{socket = RealSocket,
-                            proxy_socket = rabbit_net:maybe_get_proxy_socket(Sock),
-                            conn_name = ConnName,
-                            await_recv = false,
-                            connection_state = running,
-                            conserve = false,
-                            parse_state = rabbit_mqtt_packet:init_state()},
-            State1 = control_throttle(State0),
-            State = rabbit_event:init_stats_timer(State1, #state.stats_timer),
-            gen_server:enter_loop(?MODULE, [], State);
-        {error, Reason = enotconn} ->
-            ?LOG_INFO("MQTT could not get connection string: ~s", [Reason]),
-            rabbit_net:fast_close(RealSocket),
-            ignore;
+    ProxyProtocolEnabled = application:get_env(?APP_NAME, proxy_protocol, false),
+    case rabbit_networking:handshake(Ref, ProxyProtocolEnabled) of
         {error, Reason} ->
-            ?LOG_ERROR("MQTT could not get connection string: ~p", [Reason]),
-            rabbit_net:fast_close(RealSocket),
-            {stop, Reason}
+            ?LOG_ERROR("MQTT could not establish connection: ~s", [Reason]),
+            {stop, Reason};
+        {ok, Sock} ->
+            RealSocket = rabbit_net:unwrap_socket(Sock),
+            case rabbit_net:connection_string(Sock, inbound) of
+                {ok, ConnStr} ->
+                    ConnName = rabbit_data_coercion:to_binary(ConnStr),
+                    ?LOG_DEBUG("MQTT accepting TCP connection ~tp (~ts)", [self(), ConnName]),
+                    _ = rabbit_alarm:register(self(), {?MODULE, conserve_resources, []}),
+                    LoginTimeout = application:get_env(?APP_NAME, login_timeout, 10_000),
+                    erlang:send_after(LoginTimeout, self(), login_timeout),
+                    State0 = #state{socket = RealSocket,
+                                    proxy_socket = rabbit_net:maybe_get_proxy_socket(Sock),
+                                    conn_name = ConnName,
+                                    await_recv = false,
+                                    connection_state = running,
+                                    conserve = false,
+                                    parse_state = rabbit_mqtt_packet:init_state()},
+                    State1 = control_throttle(State0),
+                    State = rabbit_event:init_stats_timer(State1, #state.stats_timer),
+                    gen_server:enter_loop(?MODULE, [], State);
+                {error, Reason = enotconn} ->
+                    ?LOG_INFO("MQTT could not get connection string: ~s", [Reason]),
+                    rabbit_net:fast_close(RealSocket),
+                    ignore;
+                {error, Reason} ->
+                    ?LOG_ERROR("MQTT could not get connection string: ~p", [Reason]),
+                    rabbit_net:fast_close(RealSocket),
+                    {stop, Reason}
+            end
     end.
 
 handle_call({info, InfoItems}, _From, State) ->
@@ -106,11 +111,6 @@ handle_call({info, InfoItems}, _From, State) ->
 
 handle_call(Msg, From, State) ->
     {stop, {mqtt_unexpected_call, Msg, From}, State}.
-
-%% Delete this backward compatibility clause when feature flag
-%% delete_ra_cluster_mqtt_node becomes required.
-handle_cast(duplicate_id, State) ->
-    handle_cast({duplicate_id, true}, State);
 
 handle_cast({duplicate_id, SendWill},
             State = #state{proc_state = PState,
@@ -120,16 +120,9 @@ handle_cast({duplicate_id, SendWill},
     rabbit_mqtt_processor:send_disconnect(?RC_SESSION_TAKEN_OVER, PState),
     {stop, {shutdown, duplicate_id}, {SendWill, State}};
 
-handle_cast(decommission_node,
-            State = #state{ proc_state = PState,
-                            conn_name  = ConnName }) ->
-    ?LOG_WARNING("MQTT disconnecting client ~tp with client ID '~ts' as its node is about"
-                 " to be decommissioned",
-                 [ConnName, rabbit_mqtt_processor:info(client_id, PState)]),
-    {stop, {shutdown, decommission_node}, State};
-
 handle_cast({close_connection, Reason},
-            State = #state{conn_name = ConnName, proc_state = PState}) ->
+            State = #state{conn_name = ConnName,
+                           proc_state = PState}) ->
     ?LOG_WARNING("MQTT disconnecting client ~tp with client ID '~ts', reason: ~ts",
                  [ConnName, rabbit_mqtt_processor:info(client_id, PState), Reason]),
     case Reason of
@@ -140,11 +133,13 @@ handle_cast({close_connection, Reason},
 
 handle_cast(QueueEvent = {queue_event, _, _},
             State = #state{proc_state = PState0}) ->
-    case rabbit_mqtt_processor:handle_queue_event(QueueEvent, PState0) of
+    try rabbit_mqtt_processor:handle_queue_event(QueueEvent, PState0) of
         {ok, PState} ->
             maybe_process_deferred_recv(control_throttle(pstate(State, PState)));
-        {error, Reason, PState} ->
-            {stop, Reason, pstate(State, PState)}
+        {error, Reason0, PState} ->
+            {stop, Reason0, pstate(State, PState)}
+    catch throw:{send_failed, Reason1} ->
+              network_error(Reason1, State)
     end;
 
 handle_cast({force_event_refresh, Ref}, State0) ->
@@ -193,12 +188,6 @@ handle_info({Tag, Sock, Reason}, State = #state{socket = Sock})
             when Tag =:= tcp_error; Tag =:= ssl_error ->
     network_error(Reason, State);
 
-handle_info({inet_reply, Sock, ok}, State = #state{socket = Sock}) ->
-    {noreply, State, ?HIBERNATE_AFTER};
-
-handle_info({inet_reply, Sock, {error, Reason}}, State = #state{socket = Sock}) ->
-    network_error(Reason, State);
-
 handle_info({conserve_resources, Conserve}, State) ->
     maybe_process_deferred_recv(
         control_throttle(State #state{ conserve = Conserve }));
@@ -221,6 +210,14 @@ handle_info({keepalive, Req}, State = #state{proc_state = PState,
             {stop, Reason, State}
     end;
 
+handle_info(credential_expired,
+            State = #state{conn_name = ConnName,
+                           proc_state = PState}) ->
+    ?LOG_WARNING("MQTT disconnecting client ~tp with client ID '~ts' because credential expired",
+                 [ConnName, rabbit_mqtt_processor:info(client_id, PState)]),
+    rabbit_mqtt_processor:send_disconnect(?RC_MAXIMUM_CONNECT_TIME, PState),
+    {stop, {shutdown, {disconnect, server_initiated}}, State};
+
 handle_info(login_timeout, State = #state{proc_state = connect_packet_unprocessed,
                                           conn_name = ConnName}) ->
     %% The connection is also closed if the CONNECT packet happens to
@@ -235,13 +232,6 @@ handle_info(login_timeout, State) ->
 
 handle_info(emit_stats, State) ->
     {noreply, emit_stats(State), ?HIBERNATE_AFTER};
-
-handle_info({ra_event, _From, Evt},
-            #state{proc_state = PState0} = State) ->
-    %% handle applied event to ensure registration command actually got applied
-    %% handle not_leader notification in case we send the command to a non-leader
-    PState = rabbit_mqtt_processor:handle_ra_event(Evt, PState0),
-    {noreply, pstate(State, PState), ?HIBERNATE_AFTER};
 
 handle_info({{'DOWN', _QName}, _MRef, process, _Pid, _Reason} = Evt,
             #state{proc_state = PState0} = State) ->
@@ -334,16 +324,17 @@ process_received_bytes(Bytes, State = #state{socket = Socket,
         {ok, Packet, Rest, ParseState1} ->
             case ProcState of
                 connect_packet_unprocessed ->
-                    Send = fun(Data) ->
-                                   try rabbit_net:port_command(Socket, Data)
-                                   catch error:Reason ->
-                                             ?LOG_ERROR("writing to MQTT socket ~p failed: ~p",
-                                                        [Socket, Reason]),
-                                             exit({send_failed, Reason})
-                                   end,
-                                   ok
-                           end,
-                    try rabbit_mqtt_processor:init(Packet, Socket, ConnName, Send) of
+                    SendFun = fun(Data) ->
+                                      case rabbit_net:send(Socket, Data) of
+                                          ok ->
+                                              ok;
+                                          {error, Reason} ->
+                                              ?LOG_ERROR("writing to MQTT socket ~p failed: ~p",
+                                                         [Socket, Reason]),
+                                              throw({send_failed, Reason})
+                                      end
+                              end,
+                    try rabbit_mqtt_processor:init(Packet, Socket, ConnName, SendFun) of
                         {ok, ProcState1} ->
                             ?LOG_INFO("Accepted MQTT connection ~ts for client ID ~ts",
                                       [ConnName, rabbit_mqtt_processor:info(client_id, ProcState1)]),
@@ -359,7 +350,7 @@ process_received_bytes(Bytes, State = #state{socket = Socket,
                             ?LOG_ERROR("Rejected MQTT connection ~ts with Connect Reason Code ~p",
                                        [ConnName, ConnectReasonCode]),
                             {stop, shutdown, {_SendWill = false, State}}
-                    catch exit:{send_failed, Reason} ->
+                    catch throw:{send_failed, Reason} ->
                               network_error(Reason, State)
                     end;
                 _ ->
@@ -380,7 +371,7 @@ process_received_bytes(Bytes, State = #state{socket = Socket,
                             {stop, {shutdown, Reason}, pstate(State, ProcState1)};
                         {stop, {disconnect, {client_initiated, SendWill}}, ProcState1} ->
                             {stop, normal, {SendWill, pstate(State, ProcState1)}}
-                    catch exit:{send_failed, Reason} ->
+                    catch throw:{send_failed, Reason} ->
                               network_error(Reason, State)
                     end
             end;

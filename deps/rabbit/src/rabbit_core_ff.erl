@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2018-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2024 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_core_ff).
@@ -101,7 +101,7 @@
    {restart_streams,
     #{desc          => "Support for restarting streams with optional preferred next leader argument."
       "Used to implement stream leader rebalancing",
-      stability     => stable,
+      stability     => required,
       depends_on    => [stream_queue]
      }}).
 
@@ -109,20 +109,80 @@
    {stream_sac_coordinator_unblock_group,
     #{desc          => "Bug fix to unblock a group of consumers in a super stream partition",
       doc_url       => "https://github.com/rabbitmq/rabbitmq-server/issues/7743",
-      stability     => stable,
+      stability     => required,
       depends_on    => [stream_single_active_consumer]
      }}).
 
 -rabbit_feature_flag(
    {stream_filtering,
     #{desc          => "Support for stream filtering.",
-      stability     => stable,
+      stability     => required,
       depends_on    => [stream_queue]
      }}).
 
 -rabbit_feature_flag(
    {message_containers,
     #{desc          => "Message containers.",
-      stability     => stable,
+      stability     => required,
       depends_on    => [feature_flags_v2]
+     }}).
+
+-rabbit_feature_flag(
+   {khepri_db,
+    #{desc          => "Use the new Khepri Raft-based metadata store",
+      doc_url       => "", %% TODO
+      stability     => experimental,
+      depends_on    => [feature_flags_v2,
+                        direct_exchange_routing_v2,
+                        maintenance_mode_status,
+                        user_limits,
+                        virtual_host_metadata,
+                        tracking_records_in_ets,
+                        listener_records_in_ets,
+
+                        %% Deprecated features.
+                        classic_queue_mirroring,
+                        ram_node_type],
+      callbacks     => #{enable =>
+                         {rabbit_khepri, khepri_db_migration_enable},
+                         post_enable =>
+                         {rabbit_khepri, khepri_db_migration_post_enable}}
+     }}).
+
+-rabbit_feature_flag(
+   {stream_update_config_command,
+    #{desc          => "A new internal command that is used to update streams as "
+                        "part of a policy.",
+      stability     => required,
+      depends_on    => [stream_queue]
+     }}).
+
+-rabbit_feature_flag(
+   {quorum_queue_non_voters,
+    #{desc =>
+          "Allows new quorum queue members to be added as non voters initially.",
+      stability => stable,
+      depends_on => [quorum_queue]
+     }}).
+
+-rabbit_feature_flag(
+   {message_containers_deaths_v2,
+    #{desc          => "Bug fix for dead letter cycle detection",
+      doc_url       => "https://github.com/rabbitmq/rabbitmq-server/issues/11159",
+      stability     => stable,
+      depends_on    => [message_containers]
+     }}).
+
+%% We bundle the following separate concerns (which could have been separate feature flags)
+%% into a single feature flag for better user experience:
+%% 1. credit API v2 between classic / quorum queue client and classic / quorum queue server
+%% 2. cancel API v2 betweeen classic queue client and classic queue server
+%% 3. more compact quorum queue commands in quorum queue v4
+%% 4. store messages in message containers AMQP 1.0 disk format v1
+%% 5. support queue leader locator in classic queues
+-rabbit_feature_flag(
+   {'rabbitmq_4.0.0',
+    #{desc          => "Allows rolling upgrades from 3.13.x to 4.0.x",
+      stability     => stable,
+      depends_on    => [message_containers]
      }}).

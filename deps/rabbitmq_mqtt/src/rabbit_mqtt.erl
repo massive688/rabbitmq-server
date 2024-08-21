@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2024 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_mqtt).
@@ -26,12 +26,6 @@ start(normal, []) ->
     persist_static_configuration(),
     {ok, Listeners} = application:get_env(tcp_listeners),
     {ok, SslListeners} = application:get_env(ssl_listeners),
-    case rabbit_mqtt_ff:track_client_id_in_ra() of
-        true ->
-            ok = mqtt_node:start();
-        false ->
-            ok
-    end,
     Result = rabbit_mqtt_sup:start_link({Listeners, SslListeners}, []),
     EMPid = case rabbit_event:start_link() of
                 {ok, Pid}                       -> Pid;
@@ -45,32 +39,19 @@ stop(_) ->
 
 -spec emit_connection_info_all([node()], rabbit_types:info_keys(), reference(), pid()) -> term().
 emit_connection_info_all(Nodes, Items, Ref, AggregatorPid) ->
-    case rabbit_mqtt_ff:track_client_id_in_ra() of
-        true ->
-            %% Ra tracks connections cluster-wide.
-            AllPids = rabbit_mqtt_collector:list_pids(),
-            emit_connection_info(Items, Ref, AggregatorPid, AllPids),
-            %% Our node already emitted infos for all connections. Therefore, for the
-            %% remaining nodes, we send back 'finished' so that the CLI does not time out.
-            [AggregatorPid ! {Ref, finished} || _ <- lists:seq(1, length(Nodes) - 1)];
-        false ->
-            Pids = [spawn_link(Node, ?MODULE, emit_connection_info_local,
-                               [Items, Ref, AggregatorPid])
-                    || Node <- Nodes],
-            rabbit_control_misc:await_emitters_termination(Pids)
-    end.
+    Pids = [spawn_link(Node, ?MODULE, emit_connection_info_local,
+                       [Items, Ref, AggregatorPid])
+            || Node <- Nodes],
+    rabbit_control_misc:await_emitters_termination(Pids).
 
 -spec emit_connection_info_local(rabbit_types:info_keys(), reference(), pid()) -> ok.
 emit_connection_info_local(Items, Ref, AggregatorPid) ->
-    LocalPids = local_connection_pids(),
-    emit_connection_info(Items, Ref, AggregatorPid, LocalPids).
-
-emit_connection_info(Items, Ref, AggregatorPid, Pids) ->
+    LocalPids = list_local_mqtt_connections(),
     rabbit_control_misc:emitting_map_with_exit_handler(
       AggregatorPid, Ref,
       fun(Pid) ->
               rabbit_mqtt_reader:info(Pid, Items)
-      end, Pids).
+      end, LocalPids).
 
 -spec close_local_client_connections(atom()) -> {'ok', non_neg_integer()}.
 close_local_client_connections(Reason) ->
@@ -82,16 +63,17 @@ close_local_client_connections(Reason) ->
 
 -spec local_connection_pids() -> [pid()].
 local_connection_pids() ->
-    case rabbit_mqtt_ff:track_client_id_in_ra() of
-        true ->
-            AllPids = rabbit_mqtt_collector:list_pids(),
-            lists:filter(fun(Pid) -> node(Pid) =:= node() end, AllPids);
-        false ->
-            PgScope = persistent_term:get(?PG_SCOPE),
-            lists:flatmap(fun(Group) ->
-                                  pg:get_local_members(PgScope, Group)
-                          end, pg:which_groups(PgScope))
-    end.
+    PgScope = persistent_term:get(?PG_SCOPE),
+    lists:flatmap(fun(Group) ->
+                          pg:get_local_members(PgScope, Group)
+                  end, pg:which_groups(PgScope)).
+
+%% This function excludes Web MQTT connections
+list_local_mqtt_connections() ->
+    PlainPids = rabbit_networking:list_local_connections_of_protocol(?MQTT_TCP_PROTOCOL),
+    TLSPids   = rabbit_networking:list_local_connections_of_protocol(?MQTT_TLS_PROTOCOL),
+    PlainPids ++ TLSPids.
+
 
 init_global_counters() ->
     lists:foreach(fun init_global_counters/1, [?MQTT_PROTO_V3,

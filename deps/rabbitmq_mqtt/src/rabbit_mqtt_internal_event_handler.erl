@@ -2,14 +2,14 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2024 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_mqtt_internal_event_handler).
 
 -behaviour(gen_event).
 
--export([init/1, handle_event/2, handle_call/2]).
+-export([init/1, handle_event/2, handle_call/2, handle_info/2]).
 
 -import(rabbit_misc, [pget/2]).
 
@@ -35,3 +35,6 @@ handle_event(_Event, ?STATE) ->
 
 handle_call(_Request, ?STATE) ->
     {ok, ok, ?STATE}.
+
+handle_info(_Info, State) ->
+    {ok, State}.

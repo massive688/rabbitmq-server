@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2024 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 -module(rabbit_prometheus_handler).
 
@@ -10,7 +10,6 @@
 -export([generate_response/2, content_types_provided/2, is_authorized/2]).
 -export([setup/0]).
 
--include_lib("amqp_client/include/amqp_client.hrl").
 -include_lib("rabbitmq_web_dispatch/include/rabbitmq_web_dispatch_records.hrl").
 
 -define(SCRAPE_DURATION, telemetry_scrape_duration_seconds).
@@ -47,6 +46,7 @@ is_authorized(ReqData, Context) ->
 setup() ->
     setup_metrics(telemetry_registry()),
     setup_metrics('per-object'),
+    setup_metrics('memory-breakdown'),
     setup_metrics('detailed').
 
 setup_metrics(Registry) ->
@@ -172,12 +172,6 @@ put_filtering_options_into_process_dictionary(Request) ->
         Fs when is_list(Fs) ->
             put(prometheus_mf_filter, Fs);
         _ -> ok
-    end,
-    case application:get_env(rabbitmq_prometheus, filter_aggregated_queue_metrics_pattern, undefined) of
-        undefined -> ok;
-        Pattern ->
-            {ok, CompiledPattern} = re:compile(Pattern),
-            put(prometheus_queue_filter, CompiledPattern)
     end,
     ok.
 

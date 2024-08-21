@@ -2,12 +2,13 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2024 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_control_helper).
 
 -export([command/2, command/3, command/4, command_with_output/4, format_command/4]).
+-export([async_command/4, wait_for_async_command/1]).
 
 command(Command, Node, Args) ->
     command(Command, Node, Args, []).
@@ -20,6 +21,21 @@ command(Command, Node, Args, Opts) ->
         {ok, _} -> ok;
         ok      -> ok;
         Error   -> Error
+    end.
+
+async_command(Command, Node, Args, Opts) ->
+    Self = self(),
+    spawn(fun() ->
+                  Reply = (catch command(Command, Node, Args, Opts)),
+                  Self ! {async_command, Node, Reply}
+          end).
+
+wait_for_async_command(Node) ->
+    receive
+        {async_command, N, Reply} when N == Node ->
+            Reply
+    after 600000 ->
+            timeout
     end.
 
 command_with_output(Command, Node, Args, Opts) ->

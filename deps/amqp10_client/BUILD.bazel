@@ -20,7 +20,7 @@ load(
 
 APP_NAME = "amqp10_client"
 
-APP_DESCRIPTION = "AMQP 1.0 client from the RabbitMQ Project"
+APP_DESCRIPTION = "AMQP 1.0 client"
 
 APP_MODULE = "amqp10_client_app"
 
@@ -74,7 +74,10 @@ rabbitmq_app(
     ],
     license_files = [":license_files"],
     priv = [":priv"],
-    deps = ["//deps/amqp10_common:erlang_app"],
+    deps = [
+        "//deps/amqp10_common:erlang_app",
+        "@credentials_obfuscation//:erlang_app",
+    ],
 )
 
 xref(
@@ -97,7 +100,6 @@ dialyze(
 )
 
 broker_for_integration_suites(
-    extra_plugins = ["//deps/rabbitmq_amqp1_0:erlang_app"],
 )
 
 TEST_DEPS = [

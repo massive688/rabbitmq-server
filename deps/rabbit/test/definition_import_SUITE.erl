@@ -2,14 +2,13 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2024 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(definition_import_SUITE).
 
 -include_lib("rabbitmq_ct_helpers/include/rabbit_assert.hrl").
 -include_lib("common_test/include/ct.hrl").
--include_lib("rabbit_common/include/rabbit.hrl").
 -include_lib("eunit/include/eunit.hrl").
 
 -compile(export_all).
@@ -53,9 +52,10 @@ groups() ->
                                import_case17,
                                import_case18,
                                import_case19,
-                               import_case20
+                               import_case20,
+                               import_case21
                               ]},
-        
+
         {boot_time_import_using_classic_source, [], [
             import_on_a_booting_node_using_classic_local_source
         ]},
@@ -185,9 +185,9 @@ end_per_testcase(Testcase, Config) ->
 %% Tests
 %%
 
-import_case1(Config) -> import_file_case(Config, "case1").
+import_case1(Config) -> import_invalid_file_case_in_khepri(Config, "case1").
 import_case2(Config) -> import_file_case(Config, "case2").
-import_case3(Config) -> import_file_case(Config, "case3").
+import_case3(Config) -> import_invalid_file_case_in_khepri(Config, "case3").
 import_case4(Config) -> import_file_case(Config, "case4").
 import_case6(Config) -> import_file_case(Config, "case6").
 import_case7(Config) -> import_file_case(Config, "case7").
@@ -210,8 +210,9 @@ import_case11(Config) -> import_file_case(Config, "case11").
 import_case12(Config) -> import_invalid_file_case(Config, "failing_case12").
 
 import_case13(Config) ->
-    import_file_case(Config, "case13"),
     VHost = <<"/">>,
+    delete_vhost(Config, VHost),
+    import_file_case(Config, "case13"),
     QueueName = <<"definitions.import.case13.qq.1">>,
     QueueIsImported =
     fun () ->
@@ -230,8 +231,9 @@ import_case13(Config) ->
                  amqqueue:get_arguments(Q)).
 
 import_case13a(Config) ->
-    import_file_case(Config, "case13"),
     VHost = <<"/">>,
+    delete_vhost(Config, VHost),
+    import_file_case(Config, "case13"),
     QueueName = <<"definitions.import.case13.qq.1">>,
     QueueIsImported =
     fun () ->
@@ -253,20 +255,26 @@ import_case14(Config) -> import_file_case(Config, "case14").
 import_case15(Config) -> import_file_case(Config, "case15").
 %% contains a virtual host with tags
 import_case16(Config) ->
-    import_file_case(Config, "case16"),
     VHost = <<"tagged">>,
+    delete_vhost(Config, VHost),
+    import_file_case(Config, "case16"),
     VHostIsImported =
     fun () ->
             case vhost_lookup(Config, VHost) of
-                {error, {no_such_vhosts, _}} -> false;
+                {error, {no_such_vhost, _}} -> false;
+                {error, _} -> false;
                 _       -> true
             end
     end,
     rabbit_ct_helpers:await_condition(VHostIsImported, 20000),
     VHostRec = vhost_lookup(Config, VHost),
-    ?assertEqual(<<"A case16 description">>, vhost:get_description(VHostRec)),
-    ?assertEqual(<<"quorum">>, vhost:get_default_queue_type(VHostRec)),
-    ?assertEqual([multi_dc_replication,ab,cde], vhost:get_tags(VHostRec)),
+    case VHostRec of
+        {error, _} -> ct:fail("Failed to import virtual host named 'tagged' in case 16");
+        Val when is_tuple(Val) ->
+            ?assertEqual(<<"A case16 description">>, vhost:get_description(VHostRec)),
+            ?assertEqual(<<"quorum">>, vhost:get_default_queue_type(VHostRec)),
+            ?assertEqual([multi_dc_replication,ab,cde], vhost:get_tags(VHostRec))
+    end,
 
     ok.
 
@@ -304,6 +312,8 @@ import_case20(Config) ->
             %% skip the test in mixed version mode
             {skip, "Should not run in mixed version environments"}
     end.
+
+import_case21(Config) -> import_invalid_file_case(Config, "failing_case21").
 
 export_import_round_trip_case1(Config) ->
     case rabbit_ct_helpers:is_mixed_versions() of
@@ -385,6 +395,14 @@ import_file_case(Config, Subdirectory, CaseName) ->
     ok.
 
 import_invalid_file_case(Config, CaseName) ->
+    CasePath = filename:join(?config(data_dir, Config), CaseName ++ ".json"),
+    try
+        rabbit_ct_broker_helpers:rpc(Config, 0, ?MODULE, run_invalid_import_case, [CasePath])
+    catch _:_:_ -> ok
+    end,
+    ok.
+
+import_invalid_file_case_in_khepri(Config, CaseName) ->
     CasePath = filename:join(?config(data_dir, Config), CaseName ++ ".json"),
     rabbit_ct_broker_helpers:rpc(Config, 0, ?MODULE, run_invalid_import_case, [CasePath]),
     ok.
@@ -470,7 +488,6 @@ run_invalid_import_case_if_unchanged(Path) ->
         {error, _E} -> ok
     end.
 
-
 queue_lookup(Config, VHost, Name) ->
     rabbit_ct_broker_helpers:rpc(Config, 0, rabbit_amqqueue, lookup, [rabbit_misc:r(VHost, queue, Name)]).
 
@@ -479,3 +496,6 @@ vhost_lookup(Config, VHost) ->
 
 user_lookup(Config, User) ->
     rabbit_ct_broker_helpers:rpc(Config, 0, rabbit_auth_backend_internal, lookup_user, [User]).
+
+delete_vhost(Config, VHost) ->
+    rabbit_ct_broker_helpers:rpc(Config, 0, rabbit_vhost, delete, [VHost, <<"CT tests">>]).

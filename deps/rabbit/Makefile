@@ -19,7 +19,6 @@ define PROJECT_ENV
 	    {vm_memory_calculation_strategy, rss},
 	    {memory_monitor_interval, 2500},
 	    {disk_free_limit, 50000000}, %% 50MB
-	    {msg_store_index_module, rabbit_msg_store_ets_index},
 	    {backing_queue_module, rabbit_variable_queue},
 	    %% 0 ("no limit") would make a better default, but that
 	    %% breaks the QPid Java client
@@ -46,7 +45,12 @@ define PROJECT_ENV
 	    {collect_statistics_interval, 5000},
 	    {mnesia_table_loading_retry_timeout, 30000},
 	    {mnesia_table_loading_retry_limit, 10},
-	    {auth_mechanisms, ['PLAIN', 'AMQPLAIN']},
+	    %% The identity to act as for anonymous logins.
+	    {anonymous_login_user, <<"guest">>},
+	    {anonymous_login_pass, <<"guest">>},
+	    %% "The server mechanisms are ordered in decreasing level of preference."
+	    %% AMQP §5.3.3.1
+	    {auth_mechanisms, ['PLAIN', 'AMQPLAIN', 'ANONYMOUS']},
 	    {auth_backends, [rabbit_auth_backend_internal]},
 	    {delegate_count, 16},
 	    {trace_vhosts, []},
@@ -67,9 +71,6 @@ define PROJECT_ENV
 	    {ssl_apps, [asn1, crypto, public_key, ssl]},
 	    %% classic queue storage implementation version
 	    {classic_queue_default_version, 2},
-	    %% see rabbitmq-server#114
-	    {mirroring_flow_control, true},
-	    {mirroring_sync_batch_size, 4096},
 	    %% see rabbitmq-server#227 and related tickets.
 	    %% msg_store_credit_disc_bound only takes effect when
 	    %% messages are persisted to the message store. If messages
@@ -99,9 +100,6 @@ define PROJECT_ENV
 	    {cluster_nodes, {[], disc}},
 
 	    {config_entry_decoder, [{passphrase, undefined}]},
-
-	    %% rabbitmq-server#973
-	    {queue_explicit_gc_run_operation_threshold, 1000},
 	    {background_gc_enabled, false},
 	    {background_gc_target_interval, 60000},
 	    %% rabbitmq-server#589
@@ -116,42 +114,36 @@ define PROJECT_ENV
 	    {default_consumer_prefetch, {false, 0}},
 		  %% interval at which the channel can perform periodic actions
 	    {channel_tick_interval, 60000},
-	    %% Default max message size is 128 MB
-	    {max_message_size, 134217728},
+	    %% Default max message size is 16 MB
+	    {max_message_size, 16777216},
 	    %% Socket writer will run GC every 1 GB of outgoing data
 	    {writer_gc_threshold, 1000000000},
 	    %% interval at which connection/channel tracking executes post operations
 	    {tracking_execution_timeout, 15000},
 	    {stream_messages_soft_limit, 256},
-      {track_auth_attempt_source, false},
-			{credentials_obfuscation_fallback_secret, <<"nocookie">>},
-      {dead_letter_worker_consumer_prefetch, 32},
-      {dead_letter_worker_publisher_confirm_timeout, 180000},
-
-			%% EOL date for the current release series, if known/announced
-			{release_series_eol_date, none}
+      	{track_auth_attempt_source, false},
+		{credentials_obfuscation_fallback_secret, <<"nocookie">>},
+      	{dead_letter_worker_consumer_prefetch, 32},
+      	{dead_letter_worker_publisher_confirm_timeout, 180000},
+		%% EOL date for the current release series, if known/announced
+		{release_series_eol_date, none},
+		{vhost_process_reconciliation_run_interval, 30},
+		%% for testing
+		{vhost_process_reconciliation_enabled, true}
 	  ]
 endef
 
-# With Erlang.mk default behavior, the value of `$(APPS_DIR)` is always
-# relative to the top-level executed Makefile. In our case, it could be
-# a plugin for instance. However, the rabbitmq_prelaunch application is
-# in this repository, not the plugin's. That's why we need to override
-# this value here.
-APPS_DIR := $(CURDIR)/apps
-
-LOCAL_DEPS = sasl rabbitmq_prelaunch os_mon inets compiler public_key crypto ssl syntax_tools xmerl
+LOCAL_DEPS = sasl os_mon inets compiler public_key crypto ssl syntax_tools xmerl
 
 BUILD_DEPS = rabbitmq_cli
-DEPS = ranch rabbit_common ra sysmon_handler stdout_formatter recon redbug observer_cli osiris amqp10_common syslog systemd seshat
-TEST_DEPS = rabbitmq_ct_helpers rabbitmq_ct_client_helpers amqp_client meck proper
+DEPS = ranch rabbit_common amqp10_common rabbitmq_prelaunch ra sysmon_handler stdout_formatter recon redbug observer_cli osiris syslog systemd seshat khepri khepri_mnesia_migration cuttlefish gen_batch_server
+TEST_DEPS = rabbitmq_ct_helpers rabbitmq_ct_client_helpers meck proper amqp_client rabbitmq_amqp_client rabbitmq_amqp1_0
 
-PLT_APPS += mnesia
+PLT_APPS += mnesia runtime_tools
 
 dep_syslog = git https://github.com/schlagert/syslog 4.0.0
-dep_osiris = git https://github.com/rabbitmq/osiris v1.6.4
+dep_osiris = git https://github.com/rabbitmq/osiris v1.8.2
 dep_systemd = hex 0.6.1
-dep_seshat = hex 0.4.0
 
 define usage_xml_to_erl
 $(subst __,_,$(patsubst $(DOCS_DIR)/rabbitmq%.1.xml, src/rabbit_%_usage.erl, $(subst -,_,$(1))))
@@ -160,6 +152,7 @@ endef
 DOCS_DIR     = docs
 MANPAGES     = $(wildcard $(DOCS_DIR)/*.[0-9])
 WEB_MANPAGES = $(patsubst %,%.html,$(MANPAGES))
+MD_MANPAGES  = $(patsubst %,%.md,$(MANPAGES))
 
 DEP_EARLY_PLUGINS = rabbit_common/mk/rabbitmq-early-test.mk
 DEP_PLUGINS = rabbit_common/mk/rabbitmq-build.mk \
@@ -170,9 +163,6 @@ DEP_PLUGINS = rabbit_common/mk/rabbitmq-build.mk \
 
 include ../../rabbitmq-components.mk
 include ../../erlang.mk
-
-# See above why we mess with `$(APPS_DIR)`.
-unexport APPS_DIR
 
 ifeq ($(strip $(BATS)),)
 BATS := $(ERLANG_MK_TMP)/bats/bin/bats
@@ -219,7 +209,6 @@ SLOW_CT_SUITES := backing_queue \
 		  priority_queue \
 		  priority_queue_recovery \
 		  publisher_confirms_parallel \
-		  queue_master_location \
 		  queue_parallel \
 		  quorum_queue \
 		  rabbit_core_metrics_gc \
@@ -255,19 +244,8 @@ ifdef CREDIT_FLOW_TRACING
 RMQ_ERLC_OPTS += -DCREDIT_FLOW_TRACING=true
 endif
 
-ifdef DEBUG_FF
-RMQ_ERLC_OPTS += -DDEBUG_QUORUM_QUEUE_FF=true
-endif
-
 ifdef TRACE_SUPERVISOR2
 RMQ_ERLC_OPTS += -DTRACE_SUPERVISOR2=true
-endif
-
-ifndef USE_PROPER_QC
-# PropEr needs to be installed for property checking
-# http://proper.softlab.ntua.gr/
-USE_PROPER_QC := $(shell $(ERL) -eval 'io:format({module, proper} =:= code:ensure_loaded(proper)), halt().')
-RMQ_ERLC_OPTS += $(if $(filter true,$(USE_PROPER_QC)),-Duse_proper_qc)
 endif
 
 # --------------------------------------------------------------------
@@ -281,7 +259,7 @@ docs:: manpages web-manpages
 manpages: $(MANPAGES)
 	@:
 
-web-manpages: $(WEB_MANPAGES)
+web-manpages: $(WEB_MANPAGES) $(MD_MANPAGES)
 	@:
 
 # We use mandoc(1) to convert manpages to HTML plus an awk script which
@@ -309,7 +287,12 @@ web-manpages: $(WEB_MANPAGES)
 	  } } \
 	  ' > "$@"
 
+%.md: %
+	$(gen_verbose) mandoc -T markdown -O 'fragment,man=%N.%S.md' "$<" | \
+	  sed -E -e 's/\{/\&lcub;/g' \
+	> "$@"
+
 distclean:: distclean-manpages
 
 distclean-manpages::
-	$(gen_verbose) rm -f $(WEB_MANPAGES)
+	$(gen_verbose) rm -f $(WEB_MANPAGES) $(MD_MANPAGES)

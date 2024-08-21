@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2024 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_stomp_reader).
@@ -63,50 +63,54 @@ close_connection(Pid, Reason) ->
 
 init([SupHelperPid, Ref, Configuration]) ->
     process_flag(trap_exit, true),
-    {ok, Sock} = rabbit_networking:handshake(Ref,
-        application:get_env(rabbitmq_stomp, proxy_protocol, false)),
-    RealSocket = rabbit_net:unwrap_socket(Sock),
-
-    case rabbit_net:connection_string(Sock, inbound) of
-        {ok, ConnStr} ->
-            ConnName = rabbit_data_coercion:to_binary(ConnStr),
-            ProcInitArgs = processor_args(Configuration, Sock),
-            ProcState = rabbit_stomp_processor:initial_state(Configuration,
-                                                             ProcInitArgs),
-
-            rabbit_log_connection:info("accepting STOMP connection ~tp (~ts)",
-                [self(), ConnName]),
-
-            ParseState = rabbit_stomp_frame:initial_state(),
-            _ = register_resource_alarm(),
-
-            LoginTimeout = application:get_env(rabbitmq_stomp, login_timeout, 10_000),
-            MaxFrameSize = application:get_env(rabbitmq_stomp, max_frame_size, ?DEFAULT_MAX_FRAME_SIZE),
-            erlang:send_after(LoginTimeout, self(), login_timeout),
-
-            gen_server2:enter_loop(?MODULE, [],
-              rabbit_event:init_stats_timer(
-                run_socket(control_throttle(
-                  #reader_state{socket             = RealSocket,
-                                conn_name          = ConnName,
-                                parse_state        = ParseState,
-                                processor_state    = ProcState,
-                                heartbeat_sup      = SupHelperPid,
-                                heartbeat          = {none, none},
-                                max_frame_size     = MaxFrameSize,
-                                current_frame_size = 0,
-                                state              = running,
-                                conserve_resources = false,
-                                recv_outstanding   = false})), #reader_state.stats_timer),
-              {backoff, 1000, 1000, 10000});
-        {error, enotconn} ->
-            rabbit_net:fast_close(RealSocket),
-            terminate(shutdown, undefined);
+    ProxyProtocolEnabled = application:get_env(rabbitmq_stomp, proxy_protocol, false),
+    case rabbit_networking:handshake(Ref, ProxyProtocolEnabled) of
         {error, Reason} ->
-            rabbit_net:fast_close(RealSocket),
-            terminate({network_error, Reason}, undefined)
-    end.
+            rabbit_log_connection:error(
+              "STOMP could not establish connection: ~s", [Reason]),
+            {stop, Reason};
+        {ok, Sock} ->
+            RealSocket = rabbit_net:unwrap_socket(Sock),
+            case rabbit_net:connection_string(Sock, inbound) of
+                {ok, ConnStr} ->
+                    ConnName = rabbit_data_coercion:to_binary(ConnStr),
+                    ProcInitArgs = processor_args(Configuration, Sock),
+                    ProcState = rabbit_stomp_processor:initial_state(Configuration,
+                                                                    ProcInitArgs),
 
+                    rabbit_log_connection:info("accepting STOMP connection ~tp (~ts)",
+                        [self(), ConnName]),
+
+                    ParseState = rabbit_stomp_frame:initial_state(),
+                    _ = register_resource_alarm(),
+
+                    LoginTimeout = application:get_env(rabbitmq_stomp, login_timeout, 10_000),
+                    MaxFrameSize = application:get_env(rabbitmq_stomp, max_frame_size, ?DEFAULT_MAX_FRAME_SIZE),
+                    erlang:send_after(LoginTimeout, self(), login_timeout),
+
+                    gen_server2:enter_loop(?MODULE, [],
+                    rabbit_event:init_stats_timer(
+                        run_socket(control_throttle(
+                        #reader_state{socket             = RealSocket,
+                                        conn_name          = ConnName,
+                                        parse_state        = ParseState,
+                                        processor_state    = ProcState,
+                                        heartbeat_sup      = SupHelperPid,
+                                        heartbeat          = {none, none},
+                                        max_frame_size     = MaxFrameSize,
+                                        current_frame_size = 0,
+                                        state              = running,
+                                        conserve_resources = false,
+                                        recv_outstanding   = false})), #reader_state.stats_timer),
+                    {backoff, 1000, 1000, 10000});
+                {error, enotconn} ->
+                    rabbit_net:fast_close(RealSocket),
+                    terminate(shutdown, undefined);
+                {error, Reason} ->
+                    rabbit_net:fast_close(RealSocket),
+                    terminate({network_error, Reason}, undefined)
+            end
+    end.
 
 handle_call({info, InfoItems}, _From, State) ->
     Infos = lists:map(
@@ -140,12 +144,6 @@ handle_info({Tag, Sock}, State=#reader_state{socket=Sock})
 handle_info({Tag, Sock, Reason}, State=#reader_state{socket=Sock})
         when Tag =:= tcp_error; Tag =:= ssl_error ->
     {stop, {inet_error, Reason}, State};
-handle_info({inet_reply, _Sock, {error, closed}}, State) ->
-    {stop, normal, State};
-handle_info({inet_reply, _, ok}, State) ->
-    {noreply, State, hibernate};
-handle_info({inet_reply, _, Status}, State) ->
-    {stop, Status, State};
 handle_info(emit_stats, State) ->
     {noreply, emit_stats(State), hibernate};
 handle_info({conserve_resources, Conserve}, State) ->
@@ -259,7 +257,7 @@ process_received_bytes(Bytes,
                     log_reason({network_error, {frame_too_big, {FrameLength1, MaxFrameSize}}}, State),
                     {stop, normal, State};
                 false ->
-                    case rabbit_stomp_processor:process_frame(Frame, ProcState) of
+                    try rabbit_stomp_processor:process_frame(Frame, ProcState) of
                         {ok, NewProcState, Conn} ->
                             PS = rabbit_stomp_frame:initial_state(),
                             NextState = maybe_block(State, Frame),
@@ -271,6 +269,10 @@ process_received_bytes(Bytes,
                         {stop, Reason, NewProcState} ->
                             {stop, Reason,
                              processor_state(NewProcState, State)}
+                    catch exit:{send_failed, closed} ->
+                              {stop, normal, State};
+                          exit:{send_failed, Reason} ->
+                              {stop, Reason, State}
                     end
             end;
         {error, Reason} ->
@@ -404,16 +406,13 @@ log_tls_alert(Alert, ConnName) ->
 
 processor_args(Configuration, Sock) ->
     RealSocket = rabbit_net:unwrap_socket(Sock),
-    SendFun = fun (sync, IoData) ->
-                      %% no messages emitted
-                      catch rabbit_net:send(RealSocket, IoData);
-                  (async, IoData) ->
-                      %% {inet_reply, _, _} will appear soon
-                      %% We ignore certain errors here, as we will be
-                      %% receiving an asynchronous notification of the
-                      %% same (or a related) fault shortly anyway. See
-                      %% bug 21365.
-                      catch rabbit_net:port_command(RealSocket, IoData)
+    SendFun = fun(IoData) ->
+                      case rabbit_net:send(RealSocket, IoData) of
+                          ok ->
+                              ok;
+                          {error, Reason} ->
+                              exit({send_failed, Reason})
+                      end
               end,
     {ok, {PeerAddr, _PeerPort}} = rabbit_net:sockname(RealSocket),
     {SendFun, adapter_info(Sock),

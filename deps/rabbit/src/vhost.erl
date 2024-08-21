@@ -2,12 +2,11 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2018-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2024 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(vhost).
 
--include_lib("rabbit_common/include/rabbit.hrl").
 -include("vhost.hrl").
 
 -export([
@@ -20,6 +19,7 @@
   upgrade/1,
   upgrade_to/2,
   pattern_match_all/0,
+  pattern_match_names/0,
   get_name/1,
   get_limits/1,
   get_metadata/1,
@@ -29,6 +29,7 @@
   set_limits/2,
   set_metadata/2,
   merge_metadata/2,
+  new_metadata/3,
   is_tagged_with/2
 ]).
 
@@ -53,7 +54,7 @@
 
 -record(vhost, {
     %% name as a binary
-    virtual_host :: name() | '_',
+    virtual_host :: name() | '_' | '$1',
     %% proplist of limits configured, if any
     limits :: limits() | '_',
     metadata :: metadata() | '_'
@@ -67,7 +68,7 @@
 
 -type vhost_pattern() :: vhost_v2_pattern().
 -type vhost_v2_pattern() :: #vhost{
-                                  virtual_host :: name() | '_',
+                                  virtual_host :: name() | '_' | '$1',
                                   limits :: '_',
                                   metadata :: '_'
                                  }.
@@ -128,6 +129,10 @@ info_keys() ->
 pattern_match_all() ->
     #vhost{_ = '_'}.
 
+-spec pattern_match_names() -> vhost_pattern().
+pattern_match_names() ->
+    #vhost{virtual_host = '$1', _ = '_'}.
+
 -spec get_name(vhost()) -> name().
 get_name(#vhost{virtual_host = Value}) -> Value.
 
@@ -159,11 +164,35 @@ set_metadata(VHost, Value) ->
     VHost#vhost{metadata = Value}.
 
 -spec merge_metadata(vhost(), metadata()) -> vhost().
-merge_metadata(VHost, Value) ->
-    Meta0 = get_metadata(VHost),
-    NewMeta = maps:merge(Meta0, Value),
-    VHost#vhost{metadata = NewMeta}.
+merge_metadata(VHost, NewVHostMeta) ->
+    CurrentVHostMeta = get_metadata(VHost),
+    FinalMeta =  maps:merge_with(
+                   fun metadata_merger/3, CurrentVHostMeta, NewVHostMeta),
+    VHost#vhost{metadata = FinalMeta}.
 
--spec is_tagged_with(vhost:vhost(), tag()) -> boolean().
+%% This is the case where the existing VHost metadata has a default queue type
+%% value and the proposed value is `undefined`. We do not want the proposed
+%% value to overwrite the current value
+metadata_merger(default_queue_type, CurrentDefaultQueueType, undefined) ->
+    CurrentDefaultQueueType;
+%% This is the case where the existing VHost metadata has any default queue
+%% type value, and the proposed value is NOT `undefined`. It is OK for any
+%% proposed value to be used.
+metadata_merger(default_queue_type, _, NewVHostDefaultQueueType) ->
+    NewVHostDefaultQueueType;
+%% This is the case for all other VHost metadata keys.
+metadata_merger(_, _, NewMetadataValue) ->
+    NewMetadataValue.
+
+-spec new_metadata(binary(), [atom()], rabbit_queue_type:queue_type() | 'undefined') -> metadata().
+new_metadata(Description, Tags, undefined) ->
+    #{description => Description,
+      tags => Tags};
+new_metadata(Description, Tags, DefaultQueueType) ->
+    #{description => Description,
+      tags => Tags,
+      default_queue_type => DefaultQueueType}.
+
+-spec is_tagged_with(vhost(), tag()) -> boolean().
 is_tagged_with(VHost, Tag) ->
     lists:member(Tag, get_tags(VHost)).

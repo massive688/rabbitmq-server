@@ -21,11 +21,13 @@ LOCAL_DEPS = ssl
 DEPS = rabbit_common rabbit cowboy rabbitmq_mqtt
 TEST_DEPS = emqtt rabbitmq_ct_helpers rabbitmq_ct_client_helpers rabbitmq_management
 
+PLT_APPS += rabbitmqctl elixir cowlib
+
 # FIXME: Add Ranch as a BUILD_DEPS to be sure the correct version is picked.
 # See rabbitmq-components.mk.
 BUILD_DEPS += ranch
 
-dep_emqtt = git https://github.com/rabbitmq/emqtt.git master
+dep_emqtt = git https://github.com/emqx/emqtt.git 1.11.0
 
 DEP_EARLY_PLUGINS = rabbit_common/mk/rabbitmq-early-plugin.mk
 DEP_PLUGINS = rabbit_common/mk/rabbitmq-plugin.mk

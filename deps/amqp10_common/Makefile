@@ -26,6 +26,7 @@ endef
 
 DIALYZER_OPTS += --src -r test -DTEST
 BUILD_DEPS = rabbit_common
+TEST_DEPS = rabbitmq_ct_helpers proper
 
 # Variables and recipes in development.*.mk are meant to be used from
 # any Git clone. They are excluded from the files published to Hex.pm.
@@ -43,6 +44,8 @@ DEP_PLUGINS = rabbit_common/mk/rabbitmq-build.mk \
 	      rabbit_common/mk/rabbitmq-dist.mk \
 	      rabbit_common/mk/rabbitmq-test.mk \
 	      rabbit_common/mk/rabbitmq-tools.mk
+
+PLT_APPS = eunit
 
 include rabbitmq-components.mk
 include erlang.mk

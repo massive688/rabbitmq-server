@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2021 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2024 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_logger_exchange_h).
@@ -12,7 +12,6 @@
 -include_lib("rabbit_common/include/rabbit.hrl").
 -include_lib("rabbit_common/include/rabbit_framing.hrl").
 -include_lib("rabbit_common/include/logging.hrl").
-
 %% logger callbacks
 -export([log/2, adding_handler/1, removing_handler/1, changing_config/3,
          filter_config/1]).
@@ -54,12 +53,15 @@ do_log(LogEvent, #{config := #{exchange := Exchange}} = Config) ->
     PBasic = log_event_to_amqp_msg(LogEvent, Config),
     Body = try_format_body(LogEvent, Config),
     Content = rabbit_basic:build_content(PBasic, Body),
-    Anns = #{exchange => Exchange#resource.name,
-             routing_keys => [RoutingKey]},
-    Msg = mc:init(mc_amqpl, Content, Anns),
-    case rabbit_queue_type:publish_at_most_once(Exchange, Msg) of
-        ok -> ok;
-        {error, not_found} -> ok
+    case mc_amqpl:message(Exchange, RoutingKey, Content) of
+        {ok, Msg} ->
+            case rabbit_queue_type:publish_at_most_once(Exchange, Msg) of
+                ok -> ok;
+                {error, not_found} -> ok
+            end;
+        {error, _Reason} ->
+            %% it would be good to log this error but can we?
+            ok
     end.
 
 removing_handler(Config) ->
@@ -124,24 +126,38 @@ start_setup_proc(#{config := InternalConfig} = Config) ->
     {ok, DefaultVHost} = application:get_env(rabbit, default_vhost),
     Exchange = rabbit_misc:r(DefaultVHost, exchange, ?LOG_EXCH_NAME),
     InternalConfig1 = InternalConfig#{exchange => Exchange},
-
-    Pid = spawn(fun() -> setup_proc(Config#{config => InternalConfig1}) end),
+    Pid = spawn(fun() ->
+                        wait_for_initial_pass(60),
+                        setup_proc(Config#{config => InternalConfig1})
+                end),
     InternalConfig2 = InternalConfig1#{setup_proc => Pid},
     Config#{config => InternalConfig2}.
 
+%% Declaring an exchange requires the metadata store to be ready
+%% which happens on a boot step after the second phase of the prelaunch.
+%% This function waits for the store initialisation.
+wait_for_initial_pass(0) ->
+    ok;
+wait_for_initial_pass(N) ->
+    case rabbit_db:is_init_finished() of
+        false ->
+            timer:sleep(1000),
+            wait_for_initial_pass(N - 1);
+        true ->
+            ok
+    end.
+
 setup_proc(
-  #{config := #{exchange := #resource{name = Name,
-                                      virtual_host = VHost}}} = Config) ->
+  #{config := #{exchange := Exchange}} = Config) ->
     case declare_exchange(Config) of
         ok ->
             ?LOG_INFO(
-               "Logging to exchange '~ts' in vhost '~ts' ready", [Name, VHost],
+               "Logging to ~ts ready", [rabbit_misc:rs(Exchange)],
                #{domain => ?RMQLOG_DOMAIN_GLOBAL});
         error ->
             ?LOG_DEBUG(
-               "Logging to exchange '~ts' in vhost '~ts' not ready, "
-               "trying again in ~b second(s)",
-               [Name, VHost, ?DECL_EXCHANGE_INTERVAL_SECS],
+               "Logging to ~ts not ready, trying again in ~b second(s)",
+               [rabbit_misc:rs(Exchange), ?DECL_EXCHANGE_INTERVAL_SECS],
                #{domain => ?RMQLOG_DOMAIN_GLOBAL}),
             receive
                 stop -> ok
@@ -150,36 +166,45 @@ setup_proc(
             end
     end.
 
-declare_exchange(
-  #{config := #{exchange := #resource{name = Name,
-                                      virtual_host = VHost} = Exchange}}) ->
-    try
-        %% Durable.
-        #exchange{} = rabbit_exchange:declare(
-                        Exchange, topic, true, false, true, [],
-                        ?INTERNAL_USER),
-        ?LOG_DEBUG(
-           "Declared exchange '~ts' in vhost '~ts'",
-           [Name, VHost],
-           #{domain => ?RMQLOG_DOMAIN_GLOBAL}),
-        ok
+declare_exchange(#{config := #{exchange := Exchange}}) ->
+    try rabbit_exchange:declare(
+          Exchange, topic, true, false, true, [], ?INTERNAL_USER) of
+        {ok, #exchange{}} ->
+            ?LOG_DEBUG(
+               "Declared ~ts",
+               [rabbit_misc:rs(Exchange)],
+               #{domain => ?RMQLOG_DOMAIN_GLOBAL}),
+            ok;
+        {error, timeout} ->
+            ?LOG_DEBUG(
+               "Could not declare ~ts because the operation timed out",
+               [rabbit_misc:rs(Exchange)],
+               #{domain => ?RMQLOG_DOMAIN_GLOBAL}),
+            error
     catch
         Class:Reason ->
             ?LOG_DEBUG(
-               "Could not declare exchange '~ts' in vhost '~ts', "
-               "reason: ~0p:~0p",
-               [Name, VHost, Class, Reason],
+               "Could not declare ~ts, reason: ~0p:~0p",
+               [rabbit_misc:rs(Exchange), Class, Reason],
                #{domain => ?RMQLOG_DOMAIN_GLOBAL}),
            error
     end.
 
 unconfigure_exchange(
-  #{config := #{exchange := #resource{name = Name,
-                                      virtual_host = VHost} = Exchange,
+  #{config := #{exchange := Exchange,
                 setup_proc := Pid}}) ->
     Pid ! stop,
-    _ = rabbit_exchange:delete(Exchange, false, ?INTERNAL_USER),
+    case rabbit_exchange:ensure_deleted(Exchange, false, ?INTERNAL_USER) of
+        ok ->
+            ok;
+        {error, timeout} ->
+            ?LOG_ERROR(
+              "Could not delete ~ts due to a timeout",
+              [rabbit_misc:rs(Exchange)],
+              #{domain => ?RMQLOG_DOMAIN_GLOBAL}),
+            ok
+    end,
     ?LOG_INFO(
-       "Logging to exchange '~ts' in vhost '~ts' disabled",
-       [Name, VHost],
+       "Logging to ~ts disabled",
+       [rabbit_misc:rs(Exchange)],
        #{domain => ?RMQLOG_DOMAIN_GLOBAL}).

@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2021 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2024 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_observer_cli_quorum_queues).
@@ -110,9 +110,9 @@ sheet_header() ->
         #{title => "", width => 6, shortcut => "LW"},
         #{title => "", width => 5, shortcut => "CL"}
     ].
- 
+
 sheet_body(PrevState) ->
-    RaStates = ets:tab2list(ra_state),
+    {_, RaStates} = rabbit_quorum_queue:all_replica_states(),
     Body = [begin
                 #resource{name = Name, virtual_host = Vhost} = R = amqqueue:get_name(Q),
                 case rabbit_amqqueue:pid_of(Q) of
@@ -134,15 +134,17 @@ sheet_body(PrevState) ->
                                         [
                                          Pid,
                                          QName,
-                                         case proplists:get_value(InternalName, RaStates) of
+                                         case maps:get(InternalName, RaStates, undefined) of
                                              leader -> "L";
                                              follower -> "F";
+                                             promotable -> "f";  %% temporary non-voter
+                                             non_voter -> "-";  %% permanent non-voter
                                              _ -> "?"
                                          end,
                                          format_int(proplists:get_value(memory, ProcInfo)),
                                          format_int(proplists:get_value(message_queue_len, ProcInfo)),
                                          format_int(maps:get(commands, QQCounters)),
-                                         case proplists:get_value(InternalName, RaStates) of
+                                         case maps:get(InternalName, RaStates, undefined) of
                                              leader -> format_int(maps:get(snapshots_written, QQCounters));
                                              follower -> format_int(maps:get(snapshot_installed, QQCounters));
                                              _ -> "?"

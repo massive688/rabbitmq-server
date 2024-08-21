@@ -1,10 +1,10 @@
-const { By, Key, until, Builder } = require('selenium-webdriver')
+const { By, Key, until, Builder, Select } = require('selenium-webdriver')
 
 const MENU_TABS = By.css('div#menu ul#tabs')
 const USER = By.css('li#logout')
 const LOGOUT_FORM = By.css('li#logout form')
 const SELECT_VHOSTS = By.css('select#show-vhost')
-
+const SELECT_REFRESH = By.css('ul#topnav li#interval select#update-every')
 const OVERVIEW_TAB = By.css('div#menu ul#tabs li#overview')
 const CONNECTIONS_TAB = By.css('div#menu ul#tabs li#connections')
 const CHANNELS_TAB = By.css('div#menu ul#tabs li#channels')
@@ -13,17 +13,22 @@ const EXCHANGES_TAB = By.css('div#menu ul#tabs li#exchanges')
 const ADMIN_TAB = By.css('div#menu ul#tabs li#admin')
 const STREAM_CONNECTIONS_TAB = By.css('div#menu ul#tabs li#stream-connections')
 
+const FORM_POPUP = By.css('div.form-popup-warn')
+const FORM_POPUP_CLOSE_BUTTON = By.css('div.form-popup-warn span')
+
 module.exports = class BasePage {
   driver
   timeout
   polling
+  interactionDelay
 
   constructor (webdriver) {
     this.driver = webdriver
-    // this is another timeout (--timeout 10000) which is the maximum test execution time
-    this.timeout = parseInt(process.env.TIMEOUT) || 5000 // max time waiting to locate an element. Should be less that test timeout
-    this.polling = parseInt(process.env.POLLING) || 1000 // how frequent selenium searches for an element
+    this.timeout = parseInt(process.env.SELENIUM_TIMEOUT) || 1000 // max time waiting to locate an element. Should be less that test timeout
+    this.polling = parseInt(process.env.SELENIUM_POLLING) || 500 // how frequent selenium searches for an element
+    this.interactionDelay = parseInt(process.env.SELENIUM_INTERACTION_DELAY) || 0 // slow down interactions (when rabbit is behind a http proxy)
   }
+
 
   async isLoaded () {
     return this.waitForDisplayed(MENU_TABS)
@@ -36,7 +41,9 @@ module.exports = class BasePage {
   async getUser () {
     return this.getText(USER)
   }
-
+  async selectRefreshOption(option) {
+    return this.selectOption(SELECT_REFRESH, option)
+  }
   async waitForOverviewTab() {
     return this.waitForDisplayed(OVERVIEW_TAB)
   }
@@ -77,6 +84,7 @@ module.exports = class BasePage {
     return this.click(QUEUES_AND_STREAMS_TAB)
   }
   async waitForQueuesTab() {
+    await this.driver.sleep(250)
     return this.waitForDisplayed(QUEUES_AND_STREAMS_TAB)
   }
 
@@ -87,19 +95,39 @@ module.exports = class BasePage {
     return this.waitForDisplayed(STREAM_CONNECTIONS_TAB)
   }
 
-  async getSelectableVhosts() {
-    let selectable = await this.waitForDisplayed(SELECT_VHOSTS)
-    let options = await selectable.findElements(By.css('option'))
+  async getSelectableOptions(locator) {
+    let selectable = await this.waitForDisplayed(locator)
+    const select = await new Select(selectable)
+    const optionList = await select.getOptions()
+
     let table_model = []
-    for (let option of options) {
-      table_model.push(await option.getText())
+    for (const index in optionList) {
+      const t = await optionList[index].getText()
+      const v = await optionList[index].getAttribute('value')
+      table_model.push({"text":t, "value": v})
     }
+
     return table_model
   }
+  async selectOption(locator, text) {
+    let selectable = await this.waitForDisplayed(locator)
+    const select = await new Select(selectable)
+    return select.selectByVisibleText(text)
+  }
+
+  async getSelectableVhosts() {
+    const table_model = await this.getSelectableOptions(SELECT_VHOSTS)
+    let new_table_model = []
+    for (let i = 0; i < table_model.length; i++) {
+      new_table_model.push(await table_model[i].text)
+    }
+    return new_table_model
+  }
+
 
   async getTable(locator, firstNColumns) {
-    let table = await this.waitForDisplayed(locator)
-    let rows = await table.findElements(By.css('tbody tr'))
+    const table = await this.waitForDisplayed(locator)
+    const rows = await table.findElements(By.css('tbody tr'))
     let table_model = []
     for (let row of rows) {
       let columns = await row.findElements(By.css('td'))
@@ -111,11 +139,50 @@ module.exports = class BasePage {
     }
     return table_model
   }
+  async isPopupWarningDisplayed() {
+    try  {      
+      let element = await driver.findElement(FORM_POPUP)
+      return element.isDisplayed()
+    } catch(e) {
+      return Promise.resolve(false)
+    }
+    /*
+    let element = await driver.findElement(FORM_POPUP)
+    return this.driver.wait(until.elementIsVisible(element), this.timeout / 2,
+      'Timed out after [timeout=' + this.timeout + ';polling=' + this.polling + '] awaiting till visible ' + element,
+      this.polling / 2).then(function onWarningVisible(e) {
+          return Promise.resolve(true)
+      }, function onError(e) {
+          return Promise.resolve(false)
+      })
+      */
+  }
+  async getPopupWarning() {
+    let element = await driver.findElement(FORM_POPUP)
+    return this.driver.wait(until.elementIsVisible(element), this.timeout,
+      'Timed out after [timeout=' + this.timeout + ';polling=' + this.polling + '] awaiting till visible ' + element,
+      this.polling).getText().then((value) => value.substring(0, value.search('\n\nClose')))
+  }
+  async closePopupWarning() {
+    return this.click(FORM_POPUP_CLOSE_BUTTON)
+  }
+  async isDisplayed(locator) {
+      try {
+        let element = await driver.findElement(locator)
+
+        return this.driver.wait(until.elementIsVisible(element), this.timeout,
+          'Timed out after [timeout=' + this.timeout + ';polling=' + this.polling + '] awaiting till visible ' + element,
+          this.polling / 2)
+      }catch(error) {
+          return Promise.resolve(false)
+      }
+  }
 
   async waitForLocated (locator) {
     try {
       return this.driver.wait(until.elementLocated(locator), this.timeout,
-        'Timed out after 30 seconds locating ' + locator, this.polling)
+        'Timed out after [timeout=' + this.timeout + ';polling=' + this.polling + '] seconds locating ' + locator,
+        this.polling)
     }catch(error) {
       console.error("Failed to locate element " + locator)
       throw error
@@ -125,15 +192,23 @@ module.exports = class BasePage {
   async waitForVisible (element) {
     try {
       return this.driver.wait(until.elementIsVisible(element), this.timeout,
-        'Timed out after 30 seconds awaiting till visible ' + element, this.polling)
+        'Timed out after [timeout=' + this.timeout + ';polling=' + this.polling + '] awaiting till visible ' + element,
+        this.polling)
     }catch(error) {
       console.error("Failed to find visible element " + element)
       throw error
     }
   }
 
+
   async waitForDisplayed (locator) {
-    return this.waitForVisible(await this.waitForLocated(locator))
+    if (this.interactionDelay && this.interactionDelay > 0) await this.driver.sleep(this.interactionDelay)
+    try {
+      return this.waitForVisible(await this.waitForLocated(locator))
+    }catch(error) {
+      console.error("Failed to waitForDisplayed for locator " + locator)
+      throw error
+    }
   }
 
   async getText (locator) {
@@ -147,6 +222,8 @@ module.exports = class BasePage {
   }
 
   async click (locator) {
+    if (this.interactionDelay) await this.driver.sleep(this.interactionDelay)
+
     const element = await this.waitForDisplayed(locator)
     try {
       return element.click()
@@ -170,16 +247,19 @@ module.exports = class BasePage {
 
   async chooseFile (locator, file) {
     const element = await this.waitForDisplayed(locator)
-    var remote = require('selenium-webdriver/remote');
+    const remote = require('selenium-webdriver/remote');
     driver.setFileDetector(new remote.FileDetector);
     return element.sendKeys(file)
   }
   async acceptAlert () {
     await this.driver.wait(until.alertIsPresent(), this.timeout);
     await this.driver.sleep(250)
-    let alert = await this.driver.switchTo().alert();
+    const alert = await this.driver.switchTo().alert();
     await this.driver.sleep(250)
     return alert.accept();
+  }
+  log(message) {
+    console.log(new Date() + " " + message)
   }
 
   capture () {

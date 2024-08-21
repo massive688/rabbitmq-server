@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2024 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_misc).
@@ -24,7 +24,8 @@
          precondition_failed/1, precondition_failed/2]).
 -export([type_class/1, assert_args_equivalence/4, assert_field_equivalence/4]).
 -export([table_lookup/2, set_table_value/4, amqp_table/1, to_amqp_table/1]).
--export([r/3, r/2, r_arg/4, rs/1]).
+-export([r/3, r/2, r_arg/4, rs/1,
+         queue_resource/2, exchange_resource/2]).
 -export([enable_cover/0, report_cover/0]).
 -export([enable_cover/1, report_cover/1]).
 -export([start_cover/1]).
@@ -82,13 +83,13 @@
 -export([safe_ets_update_counter/3, safe_ets_update_counter/4, safe_ets_update_counter/5,
          safe_ets_update_element/3, safe_ets_update_element/4, safe_ets_update_element/5]).
 -export([is_even/1, is_odd/1]).
--export([is_valid_shortstr/1]).
 
 -export([maps_any/2,
          maps_put_truthy/3,
          maps_put_falsy/3
         ]).
 -export([remote_sup_child/2]).
+-export([for_each_while_ok/2, fold_while_ok/3]).
 
 %% Horrible macro to use in guards
 -define(IS_BENIGN_EXIT(R),
@@ -437,6 +438,16 @@ rs(#resource{virtual_host = VHostPath, kind = topic, name = Name}) ->
     format("'~ts' in vhost '~ts'", [Name, VHostPath]);
 rs(#resource{virtual_host = VHostPath, kind = Kind, name = Name}) ->
     format("~ts '~ts' in vhost '~ts'", [Kind, Name, VHostPath]).
+
+-spec queue_resource(rabbit_types:vhost(), resource_name()) ->
+    rabbit_types:r(queue).
+queue_resource(VHostPath, Name) ->
+    r(VHostPath, queue, Name).
+
+-spec exchange_resource(rabbit_types:vhost(), resource_name()) ->
+    rabbit_types:r(exchange).
+exchange_resource(VHostPath, Name) ->
+    r(VHostPath, exchange, Name).
 
 enable_cover() -> enable_cover(["."]).
 
@@ -1100,8 +1111,8 @@ rabbitmq_and_erlang_versions() ->
 which_applications() ->
     try
         application:which_applications(10000)
-    catch
-        exit:{timeout, _} -> []
+    catch _:_:_Stacktrace ->
+        []
     end.
 
 sequence_error([T])                      -> T;
@@ -1180,12 +1191,9 @@ get_proc_name() ->
             {ok, Name}
     end.
 
-%% application:get_env/3 is only available in R16B01 or later.
+%% application:get_env/3 is available in R16B01 or later.
 get_env(Application, Key, Def) ->
-    case application:get_env(Application, Key) of
-        {ok, Val} -> Val;
-        undefined -> Def
-    end.
+    application:get_env(Application, Key, Def).
 
 get_channel_operation_timeout() ->
     %% Default channel_operation_timeout set to net_ticktime + 10s to
@@ -1600,21 +1608,6 @@ is_even(N) ->
 is_odd(N) ->
     (N band 1) =:= 1.
 
--spec is_valid_shortstr(term()) -> boolean().
-is_valid_shortstr(Bin) when byte_size(Bin) < 256 ->
-    is_utf8_no_null(Bin);
-is_valid_shortstr(_) ->
-    false.
-
-is_utf8_no_null(<<>>) ->
-    true;
-is_utf8_no_null(<<0, _/binary>>) ->
-    false;
-is_utf8_no_null(<<_/utf8, Rem/binary>>) ->
-    is_utf8_no_null(Rem);
-is_utf8_no_null(_) ->
-    false.
-
 -spec maps_put_truthy(Key, Value, Map) -> Map when
       Map :: #{Key => Value}.
 maps_put_truthy(_K, undefined, M) ->
@@ -1640,3 +1633,46 @@ remote_sup_child(Node, Sup) ->
         []                              -> {error, no_child};
         {badrpc, {'EXIT', {noproc, _}}} -> {error, no_sup}
     end.
+
+-spec for_each_while_ok(ForEachFun, List) -> Ret when
+      ForEachFun :: fun((Element) -> ok | {error, ErrReason}),
+      ErrReason :: any(),
+      Element :: any(),
+      List :: [Element],
+      Ret :: ok | {error, ErrReason}.
+%% @doc Calls the given `ForEachFun' for each element in the given `List',
+%% short-circuiting if the function returns `{error,_}'.
+%%
+%% @returns the first `{error,_}' returned by `ForEachFun' or `ok' if
+%% `ForEachFun' never returns an error tuple.
+
+for_each_while_ok(Fun, [Elem | Rest]) ->
+    case Fun(Elem) of
+        ok ->
+            for_each_while_ok(Fun, Rest);
+        {error, _} = Error ->
+            Error
+    end;
+for_each_while_ok(_, []) ->
+    ok.
+
+-spec fold_while_ok(FoldFun, Acc, List) -> Ret when
+      FoldFun :: fun((Element, Acc) -> {ok, Acc} | {error, ErrReason}),
+      Element :: any(),
+      List :: Element,
+      Ret :: {ok, Acc} | {error, ErrReason}.
+%% @doc Calls the given `FoldFun' on each element of the given `List' and the
+%% accumulator value, short-circuiting if the function returns `{error,_}'.
+%%
+%% @returns the first `{error,_}' returned by `FoldFun' or `{ok,Acc}' if
+%% `FoldFun' never returns an error tuple.
+
+fold_while_ok(Fun, Acc0, [Elem | Rest]) ->
+    case Fun(Elem, Acc0) of
+        {ok, Acc} ->
+            fold_while_ok(Fun, Acc, Rest);
+        {error, _} = Error ->
+            Error
+    end;
+fold_while_ok(_Fun, Acc, []) ->
+    {ok, Acc}.

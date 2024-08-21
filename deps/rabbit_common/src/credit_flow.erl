@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2024 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(credit_flow).
@@ -37,19 +37,7 @@
 %% synchronization has not been documented, since this doesn't affect
 %% client publishes.
 
--define(DEFAULT_INITIAL_CREDIT, 200).
--define(DEFAULT_MORE_CREDIT_AFTER, 100).
-
--define(DEFAULT_CREDIT,
-        case get(credit_flow_default_credit) of
-            undefined ->
-                Val = rabbit_misc:get_env(rabbit, credit_flow_default_credit,
-                                           {?DEFAULT_INITIAL_CREDIT,
-                                            ?DEFAULT_MORE_CREDIT_AFTER}),
-                put(credit_flow_default_credit, Val),
-                Val;
-            Val       -> Val
-        end).
+-define(DEFAULT_CREDIT, persistent_term:get(credit_flow_default_credit)).
 
 -export([send/1, send/2, ack/1, ack/2, handle_bump_msg/1, blocked/0, state/0, state_delayed/1]).
 -export([peer_down/1]).
@@ -99,13 +87,13 @@
                                       {from_info, erlang:process_info(FROM)},
                                       {timestamp,
                                        os:system_time(
-                                         milliseconds)}])).
+                                         millisecond)}])).
 -define(TRACE_UNBLOCKED(SELF, FROM), rabbit_event:notify(credit_flow_unblocked,
                                        [{process, SELF},
                                         {from, FROM},
                                         {timestamp,
                                          os:system_time(
-                                           milliseconds)}])).
+                                           millisecond)}])).
 -else.
 -define(TRACE_BLOCKED(SELF, FROM), ok).
 -define(TRACE_UNBLOCKED(SELF, FROM), ok).
@@ -168,7 +156,7 @@ state_delayed(BlockedAt) ->
         B         -> Now = erlang:monotonic_time(),
                      Diff = erlang:convert_time_unit(Now - B,
                                                      native,
-                                                     micro_seconds),
+                                                     microsecond),
                      case Diff < ?STATE_CHANGE_INTERVAL of
                          true  -> flow;
                          false -> running

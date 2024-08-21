@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2024 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(proxy_protocol_SUITE).
@@ -35,9 +35,9 @@ init_per_suite(Config) ->
         {rmq_certspwd, "bunnychow"},
         {rabbitmq_ct_tls_verify, verify_none}
     ]),
-    MqttConfig = stomp_config(),
+    StompConfig = stomp_config(),
     rabbit_ct_helpers:run_setup_steps(Config1,
-        [ fun(Conf) -> merge_app_env(MqttConfig, Conf) end ] ++
+        [ fun(Conf) -> merge_app_env(StompConfig, Conf) end ] ++
             rabbit_ct_broker_helpers:setup_steps() ++
             rabbit_ct_client_helpers:setup_steps()).
 
@@ -111,8 +111,8 @@ connection_name() ->
     {_, Name} = lists:keyfind(name, 1, Values),
     Name.
 
-merge_app_env(MqttConfig, Config) ->
-    rabbit_ct_helpers:merge_app_env(Config, MqttConfig).
+merge_app_env(StompConfig, Config) ->
+    rabbit_ct_helpers:merge_app_env(Config, StompConfig).
 
 stomp_connect_frame() ->
     <<"CONNECT\n",

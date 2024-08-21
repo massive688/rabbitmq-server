@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2018-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2024 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 %% This module is a pseudo queue type.
@@ -36,6 +36,7 @@
          policy_changed/1,
          info/2,
          stat/1,
+         format/2,
          capabilities/0,
          notify_decorators/1
         ]).
@@ -47,10 +48,11 @@
          close/1,
          update/2,
          consume/3,
-         cancel/5,
+         cancel/3,
          handle_event/3,
          settle/5,
-         credit/5,
+         credit_v1/5,
+         credit/6,
          dequeue/5,
          state_info/1
         ]).
@@ -68,8 +70,10 @@ is_stateful() ->
 
 -spec declare(amqqueue:amqqueue(), node()) ->
     {'new' | 'existing' | 'owner_died', amqqueue:amqqueue()} |
-    {'absent', amqqueue:amqqueue(), rabbit_amqqueue:absent_reason()}.
+    {'absent', amqqueue:amqqueue(), rabbit_amqqueue:absent_reason()} |
+    {protocol_error, internal_error, string(), [string()]}.
 declare(Q0, _Node) ->
+    QName = amqqueue:get_name(Q0),
     Q1 = case amqqueue:get_pid(Q0) of
              none ->
                  %% declaring process becomes the queue
@@ -84,7 +88,7 @@ declare(Q0, _Node) ->
             Opts = amqqueue:get_options(Q),
             ActingUser = maps:get(user, Opts, ?UNKNOWN_USER),
             rabbit_event:notify(queue_created,
-                                [{name, amqqueue:get_name(Q)},
+                                [{name, QName},
                                  {durable, true},
                                  {auto_delete, false},
                                  {exclusive, true},
@@ -92,6 +96,11 @@ declare(Q0, _Node) ->
                                  {arguments, amqqueue:get_arguments(Q)},
                                  {user_who_performed_action, ActingUser}]),
             {new, Q};
+        {error, timeout} ->
+            {protocol_error, internal_error,
+             "Could not declare ~ts because the metadata store operation "
+             "timed out",
+             [rabbit_misc:rs(QName)]};
         Other ->
             Other
     end.
@@ -143,7 +152,7 @@ deliver(Qs, Msg, Options) ->
     {[], Actions}.
 
 -spec is_enabled() -> boolean().
-is_enabled() -> rabbit_feature_flags:is_enabled(?MODULE).
+is_enabled() -> true.
 
 -spec is_compatible(boolean(), boolean(), boolean()) ->
     boolean().
@@ -201,6 +210,12 @@ notify_decorators(_) ->
     {'ok', non_neg_integer(), non_neg_integer()}.
 stat(_Q) ->
     {ok, 0, 0}.
+
+-spec format(amqqueue:amqqueue(), map()) ->
+    [{atom(), term()}].
+format(Q, _Ctx) ->
+    [{type, ?MODULE},
+     {state, amqqueue:get_state(Q)}].
 
 -spec capabilities() ->
     #{atom() := term()}.
@@ -261,8 +276,8 @@ update(A1,A2) ->
 consume(A1,A2,A3) ->
     ?UNSUPPORTED([A1,A2,A3]).
 
-cancel(A1,A2,A3,A4,A5) ->
-    ?UNSUPPORTED([A1,A2,A3,A4,A5]).
+cancel(A1,A2,A3) ->
+    ?UNSUPPORTED([A1,A2,A3]).
 
 handle_event(A1,A2,A3) ->
     ?UNSUPPORTED([A1,A2,A3]).
@@ -270,8 +285,11 @@ handle_event(A1,A2,A3) ->
 settle(A1,A2,A3,A4,A5) ->
     ?UNSUPPORTED([A1,A2,A3,A4,A5]).
 
-credit(A1,A2,A3,A4,A5) ->
+credit_v1(A1,A2,A3,A4,A5) ->
     ?UNSUPPORTED([A1,A2,A3,A4,A5]).
+
+credit(A1,A2,A3,A4,A5,A6) ->
+    ?UNSUPPORTED([A1,A2,A3,A4,A5,A6]).
 
 dequeue(A1,A2,A3,A4,A5) ->
     ?UNSUPPORTED([A1,A2,A3,A4,A5]).

@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2024 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_mgmt_wm_vhost).
@@ -72,14 +72,18 @@ accept_content(ReqData0, Context = #context{user = #user{username = Username}}) 
               case rabbit_vhost:put_vhost(Name, Description, Tags, DefaultQT, Trace, Username) of
                   ok ->
                       {true, ReqData, Context};
-                  {error, timeout} = E ->
+                  {error, timeout} ->
                       rabbit_mgmt_util:internal_server_error(
-                        "Timed out while waiting for the vhost to initialise", E,
+                        timeout,
+                        "Timed out waiting for the vhost to initialise",
                         ReqData0, Context);
                   {error, E} ->
+                      Reason = iolist_to_binary(
+                                 io_lib:format(
+                                   "Error occurred while adding vhost: ~tp",
+                                   [E])),
                       rabbit_mgmt_util:internal_server_error(
-                        "Error occured while adding vhost", E,
-                        ReqData0, Context);
+                        Reason, ReqData0, Context);
                   {'EXIT', {vhost_limit_exceeded,
                       Explanation}} ->
                       rabbit_mgmt_util:bad_request(list_to_binary(Explanation), ReqData, Context)
@@ -88,12 +92,22 @@ accept_content(ReqData0, Context = #context{user = #user{username = Username}}) 
 
 delete_resource(ReqData, Context = #context{user = #user{username = Username}}) ->
     VHost = id(ReqData),
-    try
-        rabbit_vhost:delete(VHost, Username)
-    catch _:{error, {no_such_vhost, _}} ->
-        ok
-    end,
-    {true, ReqData, Context}.
+    case rabbit_vhost:delete(VHost, Username) of
+        ok ->
+            {true, ReqData, Context};
+        {error, timeout} ->
+            rabbit_mgmt_util:internal_server_error(
+              timeout,
+              "Timed out waiting for the vhost to be deleted",
+              ReqData, Context);
+        {error, E} ->
+            Reason = iolist_to_binary(
+                       io_lib:format(
+                         "Error occurred while deleting vhost: ~tp",
+                         [E])),
+            rabbit_mgmt_util:internal_server_error(
+              Reason, ReqData, Context)
+    end.
 
 is_authorized(ReqData, Context) ->
     rabbit_mgmt_util:is_authorized_admin(ReqData, Context).

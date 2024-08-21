@@ -2,7 +2,7 @@
 ## License, v. 2.0. If a copy of the MPL was not distributed with this
 ## file, You can obtain one at https://mozilla.org/MPL/2.0/.
 ##
-## Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+## Copyright (c) 2007-2023 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.  All rights reserved.
 
 defmodule RabbitMQ.CLI.Ctl.Commands.StatusCommand do
   alias RabbitMQ.CLI.Core.DocGuide
@@ -39,7 +39,8 @@ defmodule RabbitMQ.CLI.Ctl.Commands.StatusCommand do
         :ok
 
       false ->
-        {:validation_failure, "unit '#{unit}' is not supported. Please use one of: bytes, mb, gb"}
+        {:validation_failure,
+         "unit '#{unit}' is not supported. Please use one of: bytes, mb, mib, gb, gib, tb, tib"}
     end
   end
 
@@ -100,7 +101,7 @@ defmodule RabbitMQ.CLI.Ctl.Commands.StatusCommand do
         product_version_section ++
         [
           "RabbitMQ version: #{m[:rabbitmq_version]}",
-          "RabbitMQ release series support status: #{m[:release_series_support_status]}",
+          "RabbitMQ release series support status: see https://www.rabbitmq.com/release-information",
           "Node name: #{node_name}",
           "Erlang configuration: #{m[:erlang_version]}",
           "Crypto library: #{m[:crypto_lib_version]}",
@@ -165,8 +166,7 @@ defmodule RabbitMQ.CLI.Ctl.Commands.StatusCommand do
 
     file_descriptors = [
       "\n#{bright("File Descriptors")}\n",
-      "Total: #{m[:file_descriptors][:total_used]}, limit: #{m[:file_descriptors][:total_limit]}",
-      "Sockets: #{m[:file_descriptors][:sockets_used]}, limit: #{m[:file_descriptors][:sockets_limit]}"
+      "Total: #{m[:file_descriptors][:total_used]}, limit: #{m[:file_descriptors][:total_limit]}"
     ]
 
     disk_space_section = [
@@ -212,7 +212,10 @@ defmodule RabbitMQ.CLI.Ctl.Commands.StatusCommand do
 
   def usage_additional() do
     [
-      ["--unit <bytes | mb | gb>", "byte multiple (bytes, megabytes, gigabytes) to use"],
+      [
+        "--unit <bytes | mb | mib | gb | gib>",
+        "byte multiple (bytes, megabytes, gigabytes) to use"
+      ],
       ["--formatter <json | erlang>", "alternative formatter (JSON, Erlang terms)"]
     ]
   end

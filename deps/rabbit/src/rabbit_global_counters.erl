@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates. All rights reserved.
+%% Copyright (c) 2007-2023 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_global_counters).
@@ -93,7 +93,6 @@
 -define(MESSAGES_GET_EMPTY, 6).
 -define(MESSAGES_REDELIVERED, 7).
 -define(MESSAGES_ACKNOWLEDGED, 8).
-%% Note: ?NUM_PROTOCOL_QUEUE_TYPE_COUNTERS needs to be up-to-date. See include/rabbit_global_counters.hrl
 -define(PROTOCOL_QUEUE_TYPE_COUNTERS,
             [
                 {
@@ -131,13 +130,15 @@
             ]).
 
 boot_step() ->
-    %% Protocol counters
-    init([{protocol, amqp091}]),
+    [begin
+         %% Protocol counters
+         init([{protocol, Proto}]),
 
-    %% Protocol & Queue Type counters
-    init([{protocol, amqp091}, {queue_type, rabbit_classic_queue}]),
-    init([{protocol, amqp091}, {queue_type, rabbit_quorum_queue}]),
-    init([{protocol, amqp091}, {queue_type, rabbit_stream_queue}]),
+         %% Protocol & Queue Type counters
+         init([{protocol, Proto}, {queue_type, rabbit_classic_queue}]),
+         init([{protocol, Proto}, {queue_type, rabbit_quorum_queue}]),
+         init([{protocol, Proto}, {queue_type, rabbit_stream_queue}])
+     end || Proto <- [amqp091, amqp10]],
 
     %% Dead Letter counters
     %%

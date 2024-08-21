@@ -2,7 +2,7 @@
 ## License, v. 2.0. If a copy of the MPL was not distributed with this
 ## file, You can obtain one at https://mozilla.org/MPL/2.0/.
 ##
-## Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+## Copyright (c) 2007-2023 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.  All rights reserved.
 
 defmodule PluginsFormatterTest do
   use ExUnit.Case, async: false
@@ -76,7 +76,7 @@ defmodule PluginsFormatterTest do
               enabled: :implicit,
               running: true,
               version: ~c"3.7.0",
-              running_version: nil
+              running_version: ""
             },
             %{
               name: :mock_rabbitmq_plugins_01,

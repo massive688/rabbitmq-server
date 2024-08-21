@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2024 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(system_SUITE).
@@ -42,7 +42,12 @@ groups() ->
                        test_failed_connection_with_expired_token,
                        test_failed_connection_with_a_non_token,
                        test_failed_connection_with_a_token_with_insufficient_vhost_permission,
-                       test_failed_connection_with_a_token_with_insufficient_resource_permission
+                       test_failed_connection_with_a_token_with_insufficient_resource_permission,
+                       more_than_one_resource_server_id_not_allowed_in_one_token,
+                       mqtt_expired_token,
+                       mqtt_expirable_token,
+                       web_mqtt_expirable_token,
+                       amqp_expirable_token
                       ]},
 
      {token_refresh, [], [
@@ -213,9 +218,21 @@ init_per_testcase(Testcase, Config) when Testcase =:= test_successful_connection
     rabbit_ct_helpers:testcase_started(Config, Testcase),
     Config;
 
+init_per_testcase(multiple_resource_server_ids, Config) ->
+  ok = rabbit_ct_broker_helpers:rpc(Config, 0, application, set_env,
+      [rabbitmq_auth_backend_oauth2, scope_prefix, <<"rmq.">> ]),
+  ok = rabbit_ct_broker_helpers:rpc(Config, 0, application, set_env,
+      [rabbitmq_auth_backend_oauth2, resource_servers, #{
+          <<"prod">> => [ ],
+          <<"dev">> => [ ]
+      }]),
+  rabbit_ct_helpers:testcase_started(Config, multiple_resource_server_ids),
+  Config;
+
 init_per_testcase(Testcase, Config) ->
     rabbit_ct_helpers:testcase_started(Config, Testcase),
     Config.
+
 
 
 %%
@@ -268,6 +285,14 @@ end_per_testcase(Testcase, Config) when Testcase =:= test_successful_connection_
   ok = rabbit_ct_broker_helpers:rpc(Config, 0, application, unset_env,
         [rabbitmq_auth_backend_oauth2, scope_aliases]),
   rabbit_ct_helpers:testcase_finished(Config, Testcase),
+  Config;
+
+end_per_testcase(multiple_resource_server_ids, Config) ->
+  rabbit_ct_broker_helpers:rpc(Config, 0, application, unset_env,
+      [rabbitmq_auth_backend_oauth2, scope_prefix ]),
+  rabbit_ct_broker_helpers:rpc(Config, 0, application, unset_env,
+      [rabbitmq_auth_backend_oauth2, resource_servers ]),
+  rabbit_ct_helpers:testcase_started(Config, multiple_resource_server_ids),
   Config;
 
 end_per_testcase(Testcase, Config) ->
@@ -363,7 +388,7 @@ test_successful_connection_with_simple_strings_for_aud_and_scope(Config) ->
     {_Algo, Token} = generate_valid_token(
         Config,
         <<"rabbitmq.configure:*/* rabbitmq.write:*/* rabbitmq.read:*/*">>,
-        <<"hare rabbitmq">>
+        [<<"hare">>, <<"rabbitmq">>]
     ),
     Conn     = open_unmanaged_connection(Config, 0, <<"username">>, Token),
     {ok, Ch} = amqp_connection:open_channel(Conn),
@@ -401,14 +426,123 @@ mqtt(Config) ->
     {ok, Pub} = emqtt:start_link([{clientid, <<"mqtt-publisher">>} | Opts]),
     {ok, _} = emqtt:connect(Pub),
     {ok, _} = emqtt:publish(Pub, Topic, Payload, at_least_once),
-    receive
-        {publish, #{client_pid := Sub,
-                    topic := Topic,
-                    payload := Payload}} -> ok
+    receive {publish, #{client_pid := Sub,
+                        topic := Topic,
+                        payload := Payload}} -> ok
     after 1000 -> ct:fail("no publish received")
     end,
     ok = emqtt:disconnect(Sub),
     ok = emqtt:disconnect(Pub).
+
+mqtt_expired_token(Config) ->
+    {_Algo, Token} = generate_expired_token(Config),
+    Opts = [{port, rabbit_ct_broker_helpers:get_node_config(Config, 0, tcp_port_mqtt)},
+            {proto_ver, v5},
+            {username, <<"">>},
+            {password, Token}],
+    ClientId = atom_to_binary(?FUNCTION_NAME),
+    {ok, C} = emqtt:start_link([{clientid, ClientId} | Opts]),
+    true = unlink(C),
+    ?assertMatch({error, {bad_username_or_password, _}},
+                 emqtt:connect(C)).
+
+mqtt_expirable_token(Config) ->
+    mqtt_expirable_token0(tcp_port_mqtt,
+                          [],
+                          fun emqtt:connect/1,
+                          Config).
+
+web_mqtt_expirable_token(Config) ->
+    mqtt_expirable_token0(tcp_port_web_mqtt,
+                          [{ws_path, "/ws"}],
+                          fun emqtt:ws_connect/1,
+                          Config).
+
+mqtt_expirable_token0(Port, AdditionalOpts, Connect, Config) ->
+    Topic = <<"test/topic">>,
+    Payload = <<"mqtt-test-message">>,
+
+    Seconds = 4,
+    Millis = Seconds * 1000,
+    {_Algo, Token} = generate_expirable_token(Config,
+                                              [<<"rabbitmq.configure:*/*/*">>,
+                                               <<"rabbitmq.write:*/*/*">>,
+                                               <<"rabbitmq.read:*/*/*">>],
+                                              Seconds),
+
+    Opts = [{port, rabbit_ct_broker_helpers:get_node_config(Config, 0, Port)},
+            {proto_ver, v5},
+            {username, <<"">>},
+            {password, Token}] ++ AdditionalOpts,
+    {ok, Sub} = emqtt:start_link([{clientid, <<"my subscriber">>} | Opts]),
+    {ok, _} = Connect(Sub),
+    {ok, _, [1]} = emqtt:subscribe(Sub, Topic, at_least_once),
+    {ok, Pub} = emqtt:start_link([{clientid, <<"my publisher">>} | Opts]),
+    {ok, _} = Connect(Pub),
+    {ok, _} = emqtt:publish(Pub, Topic, Payload, at_least_once),
+    receive {publish, #{client_pid := Sub,
+                        topic := Topic,
+                        payload := Payload}} -> ok
+    after 1000 -> ct:fail("no publish received")
+    end,
+
+    %% reason code "Maximum connect time" defined in
+    %% https://docs.oasis-open.org/mqtt/mqtt/v5.0/os/mqtt-v5.0-os.html#_Toc3901208
+    ReasonCode = 16#A0,
+    true = unlink(Sub),
+    true = unlink(Pub),
+
+    %% In 4 seconds from now, we expect that RabbitMQ disconnects us because our token expired.
+    receive {disconnected, ReasonCode, _} -> ok
+    after Millis * 2 -> ct:fail("missing DISCONNECT packet from server")
+    end,
+    receive {disconnected, ReasonCode, _} -> ok
+    after Millis * 2 -> ct:fail("missing DISCONNECT packet from server")
+    end.
+
+amqp_expirable_token(Config) ->
+    {ok, _} = application:ensure_all_started(rabbitmq_amqp_client),
+
+    Seconds = 4,
+    Millis = Seconds * 1000,
+    {_Algo, Token} = generate_expirable_token(Config,
+                                              [<<"rabbitmq.configure:*/*">>,
+                                               <<"rabbitmq.write:*/*">>,
+                                               <<"rabbitmq.read:*/*">>],
+                                              Seconds),
+
+    %% Send and receive a message via AMQP 1.0.
+    QName = atom_to_binary(?FUNCTION_NAME),
+    Address = rabbitmq_amqp_address:queue(QName),
+    Host = ?config(rmq_hostname, Config),
+    Port = rabbit_ct_broker_helpers:get_node_config(Config, 0, tcp_port_amqp),
+    OpnConf = #{address => Host,
+                port => Port,
+                container_id => <<"my container">>,
+                sasl => {plain, <<"">>, Token}},
+    {ok, Connection} = amqp10_client:open_connection(OpnConf),
+    {ok, Session} = amqp10_client:begin_session_sync(Connection),
+    {ok, LinkPair} = rabbitmq_amqp_client:attach_management_link_pair_sync(Session, <<"my link pair">>),
+    {ok, _} = rabbitmq_amqp_client:declare_queue(LinkPair, QName, #{}),
+    {ok, Sender} = amqp10_client:attach_sender_link(Session, <<"my sender">>, Address),
+    receive {amqp10_event, {link, Sender, credited}} -> ok
+    after 5000 -> ct:fail({missing_event, ?LINE})
+    end,
+    Body = <<"hey">>,
+    Msg0 = amqp10_msg:new(<<"tag">>, Body),
+    ok = amqp10_client:send_msg(Sender, Msg0),
+    {ok, Receiver} = amqp10_client:attach_receiver_link(Session, <<"my receiver">>, Address),
+    {ok, Msg} = amqp10_client:get_msg(Receiver),
+    ?assertEqual([Body], amqp10_msg:body(Msg)),
+
+    %% In 4 seconds from now, we expect that RabbitMQ disconnects us because our token expired.
+    receive {amqp10_event,
+             {connection, Connection,
+              {closed, {unauthorized_access, <<"credential expired">>}}}} ->
+                ok
+    after Millis * 2 ->
+              ct:fail("server did not close our connection")
+    end.
 
 test_successful_connection_with_complex_claim_as_a_map(Config) ->
     {_Algo, Token} = generate_valid_token_with_extra_fields(
@@ -626,3 +760,8 @@ test_failed_connection_with_non_existent_scope_alias_in_scope_field(Config) ->
     {_Algo, Token} = generate_valid_token(Config, <<"non-existent alias a8798s7doaisd79">>),
     ?assertMatch({error, not_allowed},
                  open_unmanaged_connection(Config, 0, <<"vhost2">>, <<"username">>, Token)).
+
+
+more_than_one_resource_server_id_not_allowed_in_one_token(Config) ->
+    {_Algo, Token} = generate_valid_token(Config, <<"rmq.configure:*/*">>, [<<"prod">>, <<"dev">>]),
+    {error, _} = open_unmanaged_connection(Config, 0, <<"username">>, Token).

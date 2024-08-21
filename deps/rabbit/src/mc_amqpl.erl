@@ -12,8 +12,8 @@
          size/1,
          x_header/2,
          routing_headers/2,
-         convert_to/2,
-         convert_from/2,
+         convert_to/3,
+         convert_from/3,
          protocol_state/2,
          property/2,
          set_property/3,
@@ -24,8 +24,9 @@
 -export([
          message/3,
          message/4,
-         message/5,
-         from_basic_message/1
+         from_basic_message/1,
+         to_091/2,
+         from_091/2
         ]).
 
 -import(rabbit_misc,
@@ -38,8 +39,10 @@
 -define(AMQP10_PROPERTIES_HEADER, <<"x-amqp-1.0-properties">>).
 -define(AMQP10_APP_PROPERTIES_HEADER, <<"x-amqp-1.0-app-properties">>).
 -define(AMQP10_MESSAGE_ANNOTATIONS_HEADER, <<"x-amqp-1.0-message-annotations">>).
+-define(AMQP10_FOOTER, <<"x-amqp-1.0-footer">>).
 -define(PROTOMOD, rabbit_framing_amqp_0_9_1).
 -define(CLASS_ID, 60).
+-define(LONGSTR_UTF8_LIMIT, 4096).
 
 -opaque state() :: #content{}.
 
@@ -49,54 +52,60 @@
 
 %% mc implementation
 init(#content{} = Content0) ->
-    Content = rabbit_binary_parser:ensure_content_decoded(Content0),
+    Content1 = rabbit_binary_parser:ensure_content_decoded(Content0),
     %% project essential properties into annotations
-    Anns = essential_properties(Content),
-    {strip_header(Content, ?DELETED_HEADER), Anns}.
+    Anns = essential_properties(Content1),
+    Content = strip_header(Content1, ?DELETED_HEADER),
+    {Content, Anns}.
 
-convert_from(mc_amqp, Sections) ->
-    {H, MAnn, Prop, AProp, BodyRev} =
-        lists:foldl(
-          fun
-              (#'v1_0.header'{} = S, Acc) ->
-                  setelement(1, Acc, S);
-              (#'v1_0.message_annotations'{} = S, Acc) ->
-                  setelement(2, Acc, S);
-              (#'v1_0.properties'{} = S, Acc) ->
-                  setelement(3, Acc, S);
-              (#'v1_0.application_properties'{} = S, Acc) ->
-                  setelement(4, Acc, S);
-              (#'v1_0.delivery_annotations'{}, Acc) ->
-                  %% delivery annotations not currently used
-                  Acc;
-              (#'v1_0.footer'{}, Acc) ->
-                  %% footer not currently used
-                  Acc;
-              (undefined, Acc) ->
-                  Acc;
-              (BodySection, Acc) ->
-                  Body = element(5, Acc),
-                  setelement(5, Acc, [BodySection | Body])
-          end, {undefined, undefined, undefined, undefined, []},
-          Sections),
+convert_from(mc_amqp, Sections, Env) ->
+    {H, MAnn, Prop, AProp, BodyRev, Footer} =
+    lists:foldl(
+      fun(#'v1_0.header'{} = S, Acc) ->
+              setelement(1, Acc, S);
+         (_Ignore = #'v1_0.delivery_annotations'{}, Acc) ->
+              Acc;
+         (#'v1_0.message_annotations'{} = S, Acc) ->
+              setelement(2, Acc, S);
+         (#'v1_0.properties'{} = S, Acc) ->
+              setelement(3, Acc, S);
+         (#'v1_0.application_properties'{} = S, Acc) ->
+              setelement(4, Acc, S);
+         (BodySect, Acc)
+           when is_record(BodySect, 'v1_0.data') orelse
+                is_record(BodySect, 'v1_0.amqp_sequence') orelse
+                is_record(BodySect, 'v1_0.amqp_value') ->
+              Body = element(5, Acc),
+              setelement(5, Acc, [BodySect | Body]);
+         (Body = {amqp_encoded_body_and_footer, _}, Acc) ->
+              %% assertions
+              [] = element(5, Acc),
+              setelement(5, Acc, Body);
+         (#'v1_0.footer'{} = S, Acc) ->
+              setelement(6, Acc, S)
+      end,
+      {undefined, undefined, undefined, undefined, [], undefined},
+      Sections),
 
-    {PayloadRev, Type0} =
-        case BodyRev of
-            [#'v1_0.data'{content = Bin}] when is_binary(Bin) ->
-                {[Bin], undefined};
-            [#'v1_0.data'{content = Bin}] when is_list(Bin) ->
-                {lists:reverse(Bin), undefined};
-            _ ->
-                %% anything else needs to be encoded
-                %% TODO: This is potentially inefficient, but #content.payload_fragments_rev expects
-                %% currently a flat list of binaries. Can we make rabbit_writer work
-                %% with an iolist instead?
-                BinsRev = [begin
-                               IoList = amqp10_framing:encode_bin(X),
-                               erlang:iolist_to_binary(IoList)
-                           end || X <- BodyRev],
-                {BinsRev, ?AMQP10_TYPE}
-        end,
+    {PFR, Type0} = case BodyRev of
+                       [#'v1_0.data'{} | _] ->
+                           %% We assert that the body consists of one or more data sections.
+                           %% If there are multiple data sections, we concatenate the binary data.
+                           PFR0 = lists:map(
+                                    fun(#'v1_0.data'{content = Content}) ->
+                                            %% In practice, when converting from mc_amqp
+                                            %% to mc_amqpl, Content will be a single binary,
+                                            %% in which case iolist_to_binary/1 is cheap.
+                                            iolist_to_binary(Content)
+                                    end, BodyRev),
+                           {PFR0, undefined};
+                       {amqp_encoded_body_and_footer, BodyAndFooterBin} ->
+                           {[BodyAndFooterBin], ?AMQP10_TYPE};
+                       _ ->
+                           %% Anything else needs to be AMQP encoded.
+                           PFR0 = lists:map(fun amqp_encoded_binary/1, BodyRev),
+                           {PFR0, ?AMQP10_TYPE}
+                   end,
     #'v1_0.properties'{message_id = MsgId,
                        user_id = UserId0,
                        reply_to = ReplyTo0,
@@ -144,23 +153,66 @@ convert_from(mc_amqp, Sections) ->
            end,
 
     Headers0 = [to_091(K, V) || {{utf8, K}, V} <- AP,
-                                byte_size(K) =< ?AMQP_LEGACY_FIELD_NAME_MAX_LEN],
-    %% Add remaining message annotations as headers?
+                                ?IS_SHORTSTR_LEN(K)],
+    %% Add remaining x- message annotations as headers
     XHeaders = lists:filtermap(fun({{symbol, <<"x-cc">>}, V}) ->
                                        {true, to_091(<<"CC">>, V)};
-                                  ({{symbol, K}, V})
-                                    when byte_size(K) =< ?AMQP_LEGACY_FIELD_NAME_MAX_LEN ->
+                                  ({{symbol, <<"x-opt-rabbitmq-received-time">>}, {timestamp, Ts}}) ->
+                                       {true, {<<"timestamp_in_ms">>, long, Ts}};
+                                  ({{symbol, <<"x-opt-deaths">>}, V}) ->
+                                       convert_from_amqp_deaths(V);
+                                  ({{symbol, <<"x-", _/binary>> = K}, V})
+                                    when ?IS_SHORTSTR_LEN(K) ->
                                        case is_internal_header(K) of
-                                           false -> {true, to_091(K, V)};
-                                           true -> false
+                                           false ->
+                                               {true, to_091(K, V)};
+                                           true ->
+                                               false
                                        end;
                                   (_) ->
                                        false
                                end, MA),
     {Headers1, MsgId091} = message_id(MsgId, <<"x-message-id">>, Headers0),
-    {Headers, CorrId091} = message_id(CorrId, <<"x-correlation-id">>, Headers1),
+    {Headers2, CorrId091} = message_id(CorrId, <<"x-correlation-id">>, Headers1),
+
+    Headers = case Env of
+                  #{'rabbitmq_4.0.0' := false} ->
+                      Headers3 = case AProp of
+                                     undefined ->
+                                         Headers2;
+                                     #'v1_0.application_properties'{} ->
+                                         APropBin = amqp_encoded_binary(AProp),
+                                         [{?AMQP10_APP_PROPERTIES_HEADER, longstr, APropBin} | Headers2]
+                                 end,
+                      Headers4 = case Prop of
+                                     undefined ->
+                                         Headers3;
+                                     #'v1_0.properties'{} ->
+                                         PropBin = amqp_encoded_binary(Prop),
+                                         [{?AMQP10_PROPERTIES_HEADER, longstr, PropBin} | Headers3]
+                                 end,
+                      Headers5 = case MAnn of
+                                     undefined ->
+                                         Headers4;
+                                     #'v1_0.message_annotations'{} ->
+                                         MAnnBin = amqp_encoded_binary(MAnn),
+                                         [{?AMQP10_MESSAGE_ANNOTATIONS_HEADER, longstr, MAnnBin} | Headers4]
+                                 end,
+                      Headers6 = case Footer of
+                                     undefined ->
+                                         Headers5;
+                                     #'v1_0.footer'{} ->
+                                         FootBin = amqp_encoded_binary(Footer),
+                                         [{?AMQP10_FOOTER, longstr, FootBin} | Headers5]
+                                 end,
+                      Headers6;
+                  _ ->
+                      Headers2
+              end,
 
     UserId1 = unwrap(UserId0),
+    %% user-id is a binary type so we need to validate
+    %% if we can use it as is
     UserId = case mc_util:is_valid_shortstr(UserId1) of
                  true ->
                      UserId1;
@@ -169,7 +221,7 @@ convert_from(mc_amqp, Sections) ->
                      undefined
              end,
 
-    BP = #'P_basic'{message_id =  MsgId091,
+    BP = #'P_basic'{message_id = MsgId091,
                     delivery_mode = DelMode,
                     expiration = Expiration,
                     user_id = UserId,
@@ -177,9 +229,9 @@ convert_from(mc_amqp, Sections) ->
                                   [] -> undefined;
                                   AllHeaders -> AllHeaders
                               end,
-                    reply_to = unwrap(ReplyTo0),
+                    reply_to = unwrap_shortstr(ReplyTo0),
                     type = Type,
-                    app_id = unwrap(GroupId),
+                    app_id = unwrap_shortstr(GroupId),
                     priority = Priority,
                     correlation_id = CorrId091,
                     content_type = unwrap(ContentType),
@@ -189,8 +241,8 @@ convert_from(mc_amqp, Sections) ->
     #content{class_id = ?CLASS_ID,
              properties = BP,
              properties_bin = none,
-             payload_fragments_rev = PayloadRev};
-convert_from(_SourceProto, _) ->
+             payload_fragments_rev = PFR};
+convert_from(_SourceProto, _, _) ->
     not_implemented.
 
 size(#content{properties_bin = PropsBin,
@@ -263,11 +315,11 @@ prepare(store, Content) ->
     rabbit_binary_parser:clear_decoded_content(
       rabbit_binary_generator:ensure_content_encoded(Content, ?PROTOMOD)).
 
-convert_to(?MODULE, Content) ->
+convert_to(?MODULE, Content, _Env) ->
     Content;
-convert_to(mc_amqp, #content{payload_fragments_rev = Payload} = Content) ->
+convert_to(mc_amqp, #content{payload_fragments_rev = PFR} = Content, Env) ->
     #content{properties = Props} = prepare(read, Content),
-    #'P_basic'{message_id = MsgId,
+    #'P_basic'{message_id = MsgId0,
                expiration = Expiration,
                delivery_mode = DelMode,
                headers = Headers0,
@@ -276,7 +328,7 @@ convert_to(mc_amqp, #content{payload_fragments_rev = Payload} = Content) ->
                type = Type,
                priority = Priority,
                app_id = AppId,
-               correlation_id = CorrId,
+               correlation_id = CorrId0,
                content_type = ContentType,
                content_encoding = ContentEncoding,
                timestamp = Timestamp} = Props,
@@ -297,6 +349,7 @@ convert_to(mc_amqp, #content{payload_fragments_rev = Payload} = Content) ->
               undefined ->
                   undefined;
               _ ->
+                  %% Channel already checked for valid integer.
                   binary_to_integer(Expiration)
           end,
 
@@ -304,14 +357,26 @@ convert_to(mc_amqp, #content{payload_fragments_rev = Payload} = Content) ->
                        ttl = wrap(uint, Ttl),
                        %% TODO: check Priority is a ubyte?
                        priority = wrap(ubyte, Priority)},
+    CorrId = case mc_util:urn_string_to_uuid(CorrId0) of
+                 {ok, CorrUUID} ->
+                     {uuid, CorrUUID};
+                 _ ->
+                     wrap(utf8, CorrId0)
+             end,
+    MsgId = case mc_util:urn_string_to_uuid(MsgId0) of
+                 {ok, MsgUUID} ->
+                     {uuid, MsgUUID};
+                 _ ->
+                     wrap(utf8, MsgId0)
+             end,
     P = case amqp10_section_header(?AMQP10_PROPERTIES_HEADER, Headers) of
             undefined ->
-                #'v1_0.properties'{message_id = wrap(utf8, MsgId),
+                #'v1_0.properties'{message_id = MsgId,
                                    user_id = wrap(binary, UserId),
                                    to = undefined,
                                    % subject = wrap(utf8, RKey),
                                    reply_to = wrap(utf8, ReplyTo),
-                                   correlation_id = wrap(utf8, CorrId),
+                                   correlation_id = CorrId,
                                    content_type = wrap(symbol, ContentType),
                                    content_encoding = wrap(symbol, ContentEncoding),
                                    creation_time = wrap(timestamp, ConvertedTs),
@@ -357,21 +422,28 @@ convert_to(mc_amqp, #content{payload_fragments_rev = Payload} = Content) ->
              Section ->
                  Section
          end,
-
     BodySections = case Type of
                        ?AMQP10_TYPE ->
                            amqp10_framing:decode_bin(
-                             iolist_to_binary(lists:reverse(Payload)));
+                             iolist_to_binary(lists:reverse(PFR)));
                        _ ->
-                           [#'v1_0.data'{content = lists:reverse(Payload)}]
+                           [#'v1_0.data'{content = lists:reverse(PFR)}]
                    end,
+    Tail = case amqp10_section_header(?AMQP10_FOOTER, Headers) of
+               undefined ->
+                   BodySections;
+               #'v1_0.footer'{} = Footer ->
+                   BodySections ++ [Footer]
+           end,
 
-    Sections = [H, MA, P, AP | BodySections],
-    mc_amqp:convert_from(mc_amqp, Sections);
-convert_to(_TargetProto, _Content) ->
+    Sections = [H, MA, P, AP | Tail],
+    mc_amqp:convert_from(mc_amqp, Sections, Env);
+convert_to(_TargetProto, _Content, _Env) ->
     not_implemented.
 
-protocol_state(#content{properties = #'P_basic'{headers = H00} = B0} = C,
+protocol_state(#content{properties = #'P_basic'{headers = H00,
+                                                priority = Priority0,
+                                                delivery_mode = DeliveryMode0} = B0} = C,
                Anns) ->
     %% Add any x- annotations as headers
     H0 = case H00 of
@@ -379,8 +451,12 @@ protocol_state(#content{properties = #'P_basic'{headers = H00} = B0} = C,
              _ ->
                  H00
          end,
-    Deaths = maps:get(deaths, Anns, undefined),
-    Headers0 = deaths_to_headers(Deaths, H0),
+    Headers0 = case Anns of
+                   #{deaths := Deaths} ->
+                       deaths_to_headers(Deaths, H0);
+                   _ ->
+                       H0
+               end,
     Headers1 = maps:fold(
                  fun (<<"x-", _/binary>> = Key, Val, H) when is_integer(Val) ->
                          [{Key, long, Val} | H];
@@ -395,7 +471,7 @@ protocol_state(#content{properties = #'P_basic'{headers = H00} = B0} = C,
                  end, Headers0, Anns),
     Headers = case Headers1 of
                   [] ->
-                      undefined;
+                      H00;
                   _ ->
                       %% Dedup
                       lists:usort(fun({Key1, _, _}, {Key2, _, _}) ->
@@ -403,7 +479,7 @@ protocol_state(#content{properties = #'P_basic'{headers = H00} = B0} = C,
                                   end, Headers1)
               end,
     Timestamp = case Anns of
-                    #{timestamp := Ts} ->
+                    #{?ANN_TIMESTAMP := Ts} ->
                         Ts div 1000;
                     _ ->
                         undefined
@@ -414,16 +490,44 @@ protocol_state(#content{properties = #'P_basic'{headers = H00} = B0} = C,
                          %% publishes
                          undefined;
                      #{ttl := Ttl} ->
-                         %% not sure this will ever happen
-                         %% as we only ever unset the expiry
                          integer_to_binary(Ttl);
                      _ ->
                          B0#'P_basic'.expiration
                  end,
-
-    B = B0#'P_basic'{timestamp = Timestamp,
+    Priority = case Priority0 of
+                   undefined ->
+                       case Anns of
+                           #{?ANN_PRIORITY := P} ->
+                               %% This branch is hit when a message with priority was originally
+                               %% published with AMQP to a classic or quorum queue because the
+                               %% AMQP header isn't stored on disk.
+                               P;
+                           _ ->
+                               undefined
+                       end;
+                   _ ->
+                       Priority0
+               end,
+    DelMode = case DeliveryMode0 of
+                  undefined ->
+                      case Anns of
+                          #{?ANN_DURABLE := false} ->
+                              %% Leave it undefined which is equivalent to 1.
+                              undefined;
+                          _ ->
+                              %% This branch is hit when a durable message was originally published
+                              %% with AMQP to a classic or quorum queue because the AMQP header isn't
+                              %% stored on disk.
+                              2
+                      end;
+                  _ ->
+                      DeliveryMode0
+              end,
+    B = B0#'P_basic'{headers = Headers,
+                     delivery_mode = DelMode,
+                     priority = Priority,
                      expiration = Expiration,
-                     headers = Headers},
+                     timestamp = Timestamp},
 
     C#content{properties = B,
               properties_bin = none};
@@ -433,35 +537,28 @@ protocol_state(Content0, Anns) ->
     %% changed
     protocol_state(prepare(read, Content0), Anns).
 
--spec message(rabbit_types:exchange_name(), rabbit_types:routing_key(), #content{}) -> mc:state().
+-spec message(rabbit_types:exchange_name(), rabbit_types:routing_key(), #content{}) ->
+    {ok, mc:state()} | {error, Reason :: any()}.
 message(ExchangeName, RoutingKey, Content) ->
     message(ExchangeName, RoutingKey, Content, #{}).
 
+%% helper for creating message container from messages received from AMQP legacy
 -spec message(rabbit_types:exchange_name(), rabbit_types:routing_key(), #content{}, map()) ->
-    mc:state().
-message(XName, RoutingKey, Content, Anns) ->
-    message(XName, RoutingKey, Content, Anns,
-            rabbit_feature_flags:is_enabled(message_containers)).
-
-%% helper for creating message container from messages received from
-%% AMQP legacy
-message(#resource{name = ExchangeNameBin}, RoutingKey,
-        #content{properties = Props} = Content, Anns, true)
+    {ok, mc:state()} | {error, Reason :: any()}.
+message(#resource{name = ExchangeNameBin},
+        RoutingKey,
+        #content{properties = Props} = Content,
+        Anns)
   when is_binary(RoutingKey) andalso
        is_map(Anns) ->
-    HeaderRoutes = rabbit_basic:header_routes(Props#'P_basic'.headers),
-    mc:init(?MODULE,
-            rabbit_basic:strip_bcc_header(Content),
-            Anns#{routing_keys => [RoutingKey | HeaderRoutes],
-                  exchange => ExchangeNameBin});
-message(#resource{} = XName, RoutingKey,
-        #content{} = Content, Anns, false) ->
-    {ok, Msg} = rabbit_basic:message(XName, RoutingKey, Content),
-    case Anns of
-        #{id := Id} ->
-            Msg#basic_message{id = Id};
-        _ ->
-            Msg
+    case rabbit_basic:header_routes(Props#'P_basic'.headers) of
+        {error, _} = Error ->
+            Error;
+        HeaderRoutes ->
+            {ok, mc:init(?MODULE,
+                         Content,
+                         Anns#{?ANN_ROUTING_KEYS => [RoutingKey | HeaderRoutes],
+                               ?ANN_EXCHANGE => ExchangeNameBin})}
     end.
 
 from_basic_message(#basic_message{content = Content,
@@ -474,48 +571,79 @@ from_basic_message(#basic_message{content = Content,
                _ ->
                    #{id => Id}
            end,
-    message(Ex, RKey, prepare(read, Content), Anns, true).
+    {ok, Msg} = message(Ex, RKey, prepare(read, Content), Anns),
+    Msg.
 
 %% Internal
 
-deaths_to_headers(undefined, Headers) ->
-    Headers;
-deaths_to_headers(#deaths{records = Records}, Headers0) ->
-    %% sort records by the last timestamp
-    List = lists:sort(
-             fun({_, #death{anns = #{last_time := L1}}},
-                 {_, #death{anns = #{last_time := L2}}}) ->
-                     L1 < L2
-             end, maps:to_list(Records)),
-    Infos = lists:foldl(
-              fun ({{QName, Reason}, #death{anns = #{first_time := Ts} = DA,
-                                            exchange = Ex,
-                                            count = Count,
-                                            routing_keys = RoutingKeys}},
-                   Acc) ->
-                      %% The first routing key is the one specified in the
-                      %% basic.publish; all others are CC or BCC keys.
-                      RKs  = [hd(RoutingKeys) | rabbit_basic:header_routes(Headers0)],
-                      RKeys = [{longstr, Key} || Key <- RKs],
-                      ReasonBin = atom_to_binary(Reason, utf8),
-                      PerMsgTTL = case maps:get(ttl, DA, undefined) of
-                                      undefined -> [];
-                                      Ttl when is_integer(Ttl) ->
-                                          Expiration = integer_to_binary(Ttl),
-                                          [{<<"original-expiration">>, longstr,
-                                            Expiration}]
-                                  end,
-                      [{table, [{<<"count">>, long, Count},
-                                {<<"reason">>, longstr, ReasonBin},
-                                {<<"queue">>, longstr, QName},
-                                {<<"time">>, timestamp, Ts div 1000},
-                                {<<"exchange">>, longstr, Ex},
-                                {<<"routing-keys">>, array, RKeys}] ++ PerMsgTTL}
-                       | Acc]
-              end, [], List),
+deaths_to_headers(Deaths, Headers0) ->
+    Infos = case Deaths of
+                #deaths{records = Records} ->
+                    %% sort records by the last timestamp
+                    List = lists:sort(
+                             fun({_, #death{anns = #{last_time := L1}}},
+                                 {_, #death{anns = #{last_time := L2}}}) ->
+                                     L1 =< L2
+                             end, maps:to_list(Records)),
+                    lists:foldl(fun(Record, Acc) ->
+                                        Table = death_table(Record),
+                                        [Table | Acc]
+                                end, [], List);
+                _ ->
+                    lists:map(fun death_table/1, Deaths)
+            end,
     rabbit_misc:set_table_value(Headers0, <<"x-death">>, array, Infos).
 
+convert_from_amqp_deaths({array, map, Maps}) ->
+    L = lists:map(
+          fun({map, KvList}) ->
+                  {Ttl, KvList1} = case KvList of
+                                       [{{symbol, <<"ttl">>}, {uint, Ttl0}} | Tail] ->
+                                           {Ttl0, Tail};
+                                       _ ->
+                                           {undefined, KvList}
+                                   end,
+                  [
+                   {{symbol, <<"queue">>}, {utf8, Queue}},
+                   {{symbol, <<"reason">>}, {symbol, Reason}},
+                   {{symbol, <<"count">>}, {ulong, Count}},
+                   {{symbol, <<"first-time">>}, {timestamp, FirstTime}},
+                   {{symbol, <<"last-time">>}, {timestamp, _LastTime}},
+                   {{symbol, <<"exchange">>}, {utf8, Exchange}},
+                   {{symbol, <<"routing-keys">>}, {array, utf8, RKeys0}}
+                  ] = KvList1,
+                  RKeys = [Key || {utf8, Key} <- RKeys0],
+                  death_table(Queue, Reason, Exchange, RKeys, Count, FirstTime, Ttl)
+          end, Maps),
+    {true, {<<"x-death">>, array, L}};
+convert_from_amqp_deaths(_IgnoreUnknownValue) ->
+    false.
 
+death_table({{QName, Reason},
+             #death{exchange = Exchange,
+                    routing_keys = RoutingKeys,
+                    count = Count,
+                    anns = DeathAnns = #{first_time := FirstTime}}}) ->
+    death_table(QName, Reason, Exchange, RoutingKeys, Count, FirstTime,
+                maps:get(ttl, DeathAnns, undefined)).
+
+death_table(QName, Reason, Exchange, RoutingKeys, Count, FirstTime, Ttl) ->
+    L0 = [
+          {<<"count">>, long, Count},
+          {<<"reason">>, longstr, rabbit_data_coercion:to_binary(Reason)},
+          {<<"queue">>, longstr, QName},
+          {<<"time">>, timestamp, FirstTime div 1000},
+          {<<"exchange">>, longstr, Exchange},
+          {<<"routing-keys">>, array, [{longstr, Key} || Key <- RoutingKeys]}
+         ],
+    L = case Ttl of
+            undefined ->
+                L0;
+            _ ->
+                Expiration = integer_to_binary(Ttl),
+                [{<<"original-expiration">>, longstr, Expiration} | L0]
+        end,
+    {table, L}.
 
 strip_header(#content{properties = #'P_basic'{headers = undefined}}
              = DecodedContent, _Key) ->
@@ -536,16 +664,19 @@ wrap(_Type, undefined) ->
 wrap(Type, Val) ->
     {Type, Val}.
 
-from_091(longstr, V) ->
-    case mc_util:is_valid_shortstr(V) of
+from_091(longstr, V)
+  when is_binary(V) andalso
+       byte_size(V) =< ?LONGSTR_UTF8_LIMIT ->
+    %% if a longstr is longer than 4096 bytes we just assume it is binary
+    %% it _may_ still be valid utf8 but checking this for every longstr header
+    %% value is going to be excessively slow
+    case mc_util:is_utf8_no_null(V) of
         true ->
             {utf8, V};
         false ->
-            %%  if a string is longer than 255 bytes we just assume it is binary
-            %%  it _may_ still be valid utf8 but checking this is going to be
-            %%  excessively slow
             {binary, V}
     end;
+from_091(longstr, V) -> {binary, V};
 from_091(long, V) -> {long, V};
 from_091(unsignedbyte, V) -> {ubyte, V};
 from_091(short, V) -> {short, V};
@@ -596,7 +727,15 @@ unwrap({timestamp, V}) ->
 unwrap({_Type, V}) ->
     V.
 
-to_091(Key, {utf8, V}) when is_binary(V) -> {Key, longstr, V};
+unwrap_shortstr({utf8, V})
+  when is_binary(V) andalso
+       ?IS_SHORTSTR_LEN(V) ->
+    V;
+unwrap_shortstr(_) ->
+    undefined.
+
+to_091(Key, {utf8, V}) -> {Key, longstr, V};
+to_091(Key, {symbol, V}) -> {Key, longstr, V};
 to_091(Key, {long, V}) -> {Key, long, V};
 to_091(Key, {ulong, V}) -> {Key, long, V}; %% TODO: we could try to constrain this
 to_091(Key, {byte, V}) -> {Key, byte, V};
@@ -608,7 +747,7 @@ to_091(Key, {int, V}) -> {Key, signedint, V};
 to_091(Key, {double, V}) -> {Key, double, V};
 to_091(Key, {float, V}) -> {Key, float, V};
 to_091(Key, {timestamp, V}) -> {Key, timestamp, V div 1000};
-to_091(Key, {binary, V}) -> {Key, binary, V};
+to_091(Key, {binary, V}) -> {Key, longstr, V};
 to_091(Key, {boolean, V}) -> {Key, bool, V};
 to_091(Key, true) -> {Key, bool, true};
 to_091(Key, false) -> {Key, bool, false};
@@ -620,6 +759,7 @@ to_091(Key, {map, M}) ->
     {Key, table, [to_091(unwrap(K), V) || {K, V} <- M]}.
 
 to_091({utf8, V}) -> {longstr, V};
+to_091({symbol, V}) -> {longstr, V};
 to_091({long, V}) -> {long, V};
 to_091({byte, V}) -> {byte, V};
 to_091({ubyte, V}) -> {unsignedbyte, V};
@@ -630,7 +770,7 @@ to_091({int, V}) -> {signedint, V};
 to_091({double, V}) -> {double, V};
 to_091({float, V}) -> {float, V};
 to_091({timestamp, V}) -> {timestamp, V div 1000};
-to_091({binary, V}) -> {binary, V};
+to_091({binary, V}) -> {longstr, V};
 to_091({boolean, V}) -> {bool, V};
 to_091(true) -> {bool, true};
 to_091(false) -> {bool, false};
@@ -642,17 +782,17 @@ to_091({map, M}) ->
     {table, [to_091(unwrap(K), V) || {K, V} <- M]}.
 
 message_id({uuid, UUID}, _HKey, H0) ->
-    {H0, mc_util:uuid_to_string(UUID)};
+    {H0, mc_util:uuid_to_urn_string(UUID)};
 message_id({ulong, N}, _HKey, H0) ->
     {H0, erlang:integer_to_binary(N)};
 message_id({binary, B}, HKey, H0) ->
-    {[{HKey, longstr, B} | H0], undefined};
+    {[{HKey, binary, B} | H0], undefined};
 message_id({utf8, S}, HKey, H0) ->
-    case byte_size(S) > 255 of
+    case ?IS_SHORTSTR_LEN(S) of
         true ->
-            {[{HKey, longstr, S} | H0], undefined};
+            {H0, S};
         false ->
-            {H0, S}
+            {[{HKey, longstr, S} | H0], undefined}
     end;
 message_id(undefined, _HKey, H) ->
     {H, undefined}.
@@ -660,7 +800,8 @@ message_id(undefined, _HKey, H) ->
 essential_properties(#content{} = C) ->
     #'P_basic'{delivery_mode = Mode,
                priority = Priority,
-               timestamp = TimestampRaw} = Props = C#content.properties,
+               timestamp = TimestampRaw,
+               headers = Headers} = Props = C#content.properties,
     {ok, MsgTTL} = rabbit_basic:parse_expiration(Props),
     Timestamp = case TimestampRaw of
                     undefined ->
@@ -670,15 +811,23 @@ essential_properties(#content{} = C) ->
                         TimestampRaw * 1000
                 end,
     Durable = Mode == 2,
+    BccKeys = case rabbit_basic:header(<<"BCC">>, Headers) of
+                  {<<"BCC">>, array, Routes} ->
+                      [Route || {longstr, Route} <- Routes];
+                  _ ->
+                      undefined
+              end,
     maps_put_truthy(
-      priority, Priority,
+      ?ANN_PRIORITY, Priority,
       maps_put_truthy(
         ttl, MsgTTL,
         maps_put_truthy(
-          timestamp, Timestamp,
+          ?ANN_TIMESTAMP, Timestamp,
           maps_put_falsy(
-            durable, Durable,
-            #{})))).
+            ?ANN_DURABLE, Durable,
+            maps_put_truthy(
+              bcc, BccKeys,
+              #{}))))).
 
 %% headers that are added as annotations during conversions
 is_internal_header(<<"x-basic-", _/binary>>) ->
@@ -700,3 +849,6 @@ amqp10_section_header(Header, Headers) ->
         _ ->
             undefined
     end.
+
+amqp_encoded_binary(Section) ->
+    iolist_to_binary(amqp10_framing:encode_bin(Section)).

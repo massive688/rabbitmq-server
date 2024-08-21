@@ -1,8 +1,8 @@
- % This Source Code Form is subject to the terms of the Mozilla Public
+%% This Source Code Form is subject to the terms of the Mozilla Public
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2011-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2024 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(backing_queue_SUITE).
@@ -27,17 +27,13 @@
     variable_queue_drop,
     variable_queue_fold_msg_on_disk,
     variable_queue_dropfetchwhile,
-    variable_queue_dropwhile_varying_ram_duration,
     variable_queue_dropwhile_restart,
     variable_queue_dropwhile_sync_restart,
-    variable_queue_fetchwhile_varying_ram_duration,
     variable_queue_ack_limiting,
     variable_queue_purge,
     variable_queue_requeue,
     variable_queue_requeue_ram_beta,
-    variable_queue_fold,
-    variable_queue_batch_publish,
-    variable_queue_batch_publish_delivered
+    variable_queue_fold
   ]).
 
 -define(BACKING_QUEUE_TESTCASES, [
@@ -66,8 +62,8 @@ groups() ->
     [
      {backing_queue_tests, [], [
           msg_store,
-          {backing_queue_v2, [], Common ++ V2Only},
-          {backing_queue_v1, [], Common}
+          msg_store_file_scan,
+          {backing_queue_v2, [], Common ++ V2Only}
         ]}
     ].
 
@@ -93,7 +89,7 @@ end_per_suite(Config) ->
 init_per_group(Group, Config) ->
     case lists:member({group, Group}, all()) of
         true ->
-            ClusterSize = 2,
+            ClusterSize = 1,
             Config1 = rabbit_ct_helpers:set_config(Config, [
                 {rmq_nodename_suffix, Group},
                 {rmq_nodes_count, ClusterSize}
@@ -101,8 +97,7 @@ init_per_group(Group, Config) ->
             rabbit_ct_helpers:run_steps(Config1,
               rabbit_ct_broker_helpers:setup_steps() ++
               rabbit_ct_client_helpers:setup_steps() ++ [
-                fun(C) -> init_per_group1(Group, C) end,
-                fun setup_file_handle_cache/1
+                fun(C) -> init_per_group1(Group, C) end
               ]);
         false ->
             rabbit_ct_helpers:run_steps(Config, [
@@ -123,14 +118,6 @@ init_per_group1(backing_queue_tests, Config) ->
                "Backing queue module not supported by this test group: ~tp~n",
                [Module])}
     end;
-init_per_group1(backing_queue_v1, Config) ->
-    ok = rabbit_ct_broker_helpers:rpc(Config, 0,
-      application, set_env, [rabbit, classic_queue_default_version, 1]),
-    Config;
-init_per_group1(backing_queue_v2, Config) ->
-    ok = rabbit_ct_broker_helpers:rpc(Config, 0,
-      application, set_env, [rabbit, classic_queue_default_version, 2]),
-    Config;
 init_per_group1(backing_queue_embed_limit_0, Config) ->
     ok = rabbit_ct_broker_helpers:rpc(Config, 0,
       application, set_env, [rabbit, queue_index_embed_msgs_below, 0]),
@@ -149,17 +136,6 @@ init_per_group1(from_cluster_node2, Config) ->
 init_per_group1(_, Config) ->
     Config.
 
-setup_file_handle_cache(Config) ->
-    ok = rabbit_ct_broker_helpers:rpc(Config, 0,
-      ?MODULE, setup_file_handle_cache1, []),
-    Config.
-
-setup_file_handle_cache1() ->
-    %% FIXME: Why are we doing this?
-    application:set_env(rabbit, file_handles_high_watermark, 100),
-    ok = file_handle_cache:set_limit(100),
-    ok.
-
 end_per_group(Group, Config) ->
     case lists:member({group, Group}, all()) of
         true ->
@@ -175,12 +151,6 @@ end_per_group1(backing_queue_tests, Config) ->
     rabbit_ct_broker_helpers:rpc(Config, 0,
       ?MODULE, teardown_backing_queue_test_group, [Config]);
 end_per_group1(Group, Config)
-when   Group =:= backing_queue_v1
-orelse Group =:= backing_queue_v2 ->
-    ok = rabbit_ct_broker_helpers:rpc(Config, 0,
-      application, unset_env, [rabbit, classic_queue_default_version]),
-    Config;
-end_per_group1(Group, Config)
 when   Group =:= backing_queue_embed_limit_0
 orelse Group =:= backing_queue_embed_limit_1024 ->
     ok = rabbit_ct_broker_helpers:rpc(Config, 0,
@@ -192,18 +162,12 @@ end_per_group1(_, Config) ->
 
 init_per_testcase(Testcase, Config) when Testcase == variable_queue_requeue;
                                          Testcase == variable_queue_fold ->
-    ok = rabbit_ct_broker_helpers:rpc(
-           Config, 0, application, set_env,
-           [rabbit, queue_explicit_gc_run_operation_threshold, 0]),
     rabbit_ct_helpers:testcase_started(Config, Testcase);
 init_per_testcase(Testcase, Config) ->
     rabbit_ct_helpers:testcase_started(Config, Testcase).
 
 end_per_testcase(Testcase, Config) when Testcase == variable_queue_requeue;
                                         Testcase == variable_queue_fold ->
-    ok = rabbit_ct_broker_helpers:rpc(
-           Config, 0, application, set_env,
-           [rabbit, queue_explicit_gc_run_operation_threshold, 1000]),
     rabbit_ct_helpers:testcase_finished(Config, Testcase);
 end_per_testcase(Testcase, Config) ->
     rabbit_ct_helpers:testcase_finished(Config, Testcase).
@@ -536,6 +500,191 @@ test_msg_store_client_delete_and_terminate(GenRef) ->
     passed.
 
 %% -------------------------------------------------------------------
+%% Message store file scanning.
+%% -------------------------------------------------------------------
+
+%% While it is possible although very unlikely that this test case
+%% produces false positives, all failures of this test case should
+%% be investigated thoroughly as they test an algorithm that is
+%% central to the reliability of the data in the shared message store.
+%% Failing files can be found in the CT private data.
+msg_store_file_scan(Config) ->
+    passed = rabbit_ct_broker_helpers:rpc(Config, 0,
+      ?MODULE, msg_store_file_scan1, [Config]).
+
+msg_store_file_scan1(Config) ->
+    Scan = fun (Blocks) ->
+        Expected = gen_result(Blocks),
+        Path = gen_msg_file(Config, Blocks),
+        Result = rabbit_msg_store:scan_file_for_valid_messages(Path),
+        case Result of
+            Expected -> ok;
+            _ -> {expected, Expected, got, Result}
+        end
+    end,
+    %% Empty files.
+    ok = Scan([]),
+    ok = Scan([{pad, 1024}]),
+    ok = Scan([{pad, 1024 * 1024}]),
+    %% One-message files.
+    ok = Scan([{msg, gen_id(), <<0>>}]),
+    ok = Scan([{msg, gen_id(), <<255>>}]),
+    ok = Scan([{msg, gen_id(), gen_msg()}]),
+    ok = Scan([{pad, 1024}, {msg, gen_id(), gen_msg()}]),
+    ok = Scan([{pad, 1024 * 1024}, {msg, gen_id(), gen_msg()}]),
+    ok = Scan([{msg, gen_id(), gen_msg()}, {pad, 1024}]),
+    ok = Scan([{msg, gen_id(), gen_msg()}, {pad, 1024 * 1024}]),
+    %% Multiple messages.
+    ok = Scan([{msg, gen_id(), gen_msg()} || _ <- lists:seq(1, 2)]),
+    ok = Scan([{msg, gen_id(), gen_msg()} || _ <- lists:seq(1, 5)]),
+    ok = Scan([{msg, gen_id(), gen_msg()} || _ <- lists:seq(1, 20)]),
+    ok = Scan([{msg, gen_id(), gen_msg()} || _ <- lists:seq(1, 100)]),
+    %% Multiple messages with padding.
+    ok = Scan([
+        {pad, 1024},
+        {msg, gen_id(), gen_msg()},
+        {msg, gen_id(), gen_msg()}
+    ]),
+    ok = Scan([
+        {msg, gen_id(), gen_msg()},
+        {pad, 1024},
+        {msg, gen_id(), gen_msg()}
+    ]),
+    ok = Scan([
+        {msg, gen_id(), gen_msg()},
+        {msg, gen_id(), gen_msg()},
+        {pad, 1024}
+    ]),
+    ok = Scan([
+        {pad, 1024},
+        {msg, gen_id(), gen_msg()},
+        {pad, 1024},
+        {msg, gen_id(), gen_msg()}
+    ]),
+    ok = Scan([
+        {msg, gen_id(), gen_msg()},
+        {pad, 1024},
+        {msg, gen_id(), gen_msg()},
+        {pad, 1024}
+    ]),
+    ok = Scan([
+        {pad, 1024},
+        {msg, gen_id(), gen_msg()},
+        {msg, gen_id(), gen_msg()},
+        {pad, 1024}
+    ]),
+    ok = Scan([
+        {pad, 1024},
+        {msg, gen_id(), gen_msg()},
+        {pad, 1024},
+        {msg, gen_id(), gen_msg()},
+        {pad, 1024}
+    ]),
+    OneOf = fun(A, B) ->
+        case rand:uniform() of
+            F when F < +0.5 -> A;
+            _ -> B
+        end
+    end,
+    ok = Scan([OneOf({msg, gen_id(), gen_msg()}, {pad, 1024}) || _ <- lists:seq(1, 2)]),
+    ok = Scan([OneOf({msg, gen_id(), gen_msg()}, {pad, 1024}) || _ <- lists:seq(1, 5)]),
+    ok = Scan([OneOf({msg, gen_id(), gen_msg()}, {pad, 1024}) || _ <- lists:seq(1, 20)]),
+    ok = Scan([OneOf({msg, gen_id(), gen_msg()}, {pad, 1024}) || _ <- lists:seq(1, 100)]),
+    %% Duplicate messages.
+    Msg = {msg, gen_id(), gen_msg()},
+    ok = Scan([Msg, Msg]),
+    ok = Scan([Msg, Msg, Msg, Msg, Msg]),
+    ok = Scan([Msg, {pad, 1024}, Msg]),
+    ok = Scan([Msg]
+        ++ [OneOf({msg, gen_id(), gen_msg()}, {pad, 1024}) || _ <- lists:seq(1, 100)]
+        ++ [Msg]),
+    %% Truncated start of message.
+    ok = Scan([{bin, <<21:56, "deadbeefdeadbeef", "hello", 255>>}]),
+    ok = Scan([{bin, <<21:48, "deadbeefdeadbeef", "hello", 255>>}]),
+    ok = Scan([{bin, <<21:40, "deadbeefdeadbeef", "hello", 255>>}]),
+    ok = Scan([{bin, <<21:32, "deadbeefdeadbeef", "hello", 255>>}]),
+    ok = Scan([{bin, <<21:24, "deadbeefdeadbeef", "hello", 255>>}]),
+    ok = Scan([{bin, <<21:16, "deadbeefdeadbeef", "hello", 255>>}]),
+    ok = Scan([{bin, <<21:8, "deadbeefdeadbeef", "hello", 255>>}]),
+    ok = Scan([{bin, <<"deadbeefdeadbeef", "hello", 255>>}]),
+    ok = Scan([{bin, <<"beefdeadbeef", "hello", 255>>}]),
+    ok = Scan([{bin, <<"deadbeef", "hello", 255>>}]),
+    ok = Scan([{bin, <<"beef", "hello", 255>>}]),
+    ok = Scan([{bin, <<"hello", 255>>}]),
+    ok = Scan([{bin, <<255>>}]),
+    %% Truncated end of message (unlikely).
+    ok = Scan([{bin, <<255>>}]),
+    ok = Scan([{bin, <<255, 255>>}]),
+    ok = Scan([{bin, <<255, 255, 255>>}]),
+    ok = Scan([{bin, <<255, 255, 255, 255>>}]),
+    ok = Scan([{bin, <<255, 255, 255, 255, 255>>}]),
+    ok = Scan([{bin, <<255, 255, 255, 255, 255, 255>>}]),
+    ok = Scan([{bin, <<255, 255, 255, 255, 255, 255, 255>>}]),
+    ok = Scan([{bin, <<255, 255, 255, 255, 255, 255, 255, 255>>}]),
+    ok = Scan([{bin, <<15:64, "deadbeefdeadbee">>}]),
+    ok = Scan([{bin, <<16:64, "deadbeefdeadbeef">>}]),
+    ok = Scan([{bin, <<17:64, "deadbeefdeadbeef", 0>>}]),
+    ok = Scan([{bin, <<17:64, "deadbeefdeadbeef", 255>>}]),
+    ok = Scan([{bin, <<17:64, "deadbeefdeadbeef", 255, 254>>}]),
+    %% Messages with no content.
+    ok = Scan([{bin, <<0:64, "deadbeefdeadbeef", 255>>}]),
+    ok = Scan([{msg, gen_id(), <<>>}]),
+    %% All good!!
+    passed.
+
+gen_id() ->
+    rand:bytes(16).
+
+gen_msg() ->
+    gen_msg(1024 * 1024).
+
+gen_msg(MaxSize) ->
+    %% This might generate false positives but very rarely
+    %% so we don't do anything to prevent them.
+    rand:bytes(rand:uniform(MaxSize)).
+
+gen_msg_file(Config, Blocks) ->
+    PrivDir = ?config(priv_dir, Config),
+    TmpFile = integer_to_list(erlang:unique_integer([positive])),
+    Path = filename:join(PrivDir, TmpFile),
+    ok = file:write_file(Path, [case Block of
+        {bin, Bin} ->
+            Bin;
+        {pad, Size} ->
+            %% This might generate false positives although very unlikely.
+            rand:bytes(Size);
+        {msg, MsgId, Msg} ->
+            Size = 16 + byte_size(Msg),
+            [<<Size:64>>, MsgId, Msg, <<255>>]
+    end || Block <- Blocks]),
+    Path.
+
+gen_result(Blocks) ->
+    Messages = gen_result(Blocks, 0, []),
+    case Messages of
+        [] ->
+            {ok, [], 0};
+        [{_, TotalSize, Offset}|_] ->
+            {ok, Messages, Offset + TotalSize}
+    end.
+
+gen_result([], _, Acc) ->
+    Acc;
+gen_result([{bin, Bin}|Tail], Offset, Acc) ->
+    gen_result(Tail, Offset + byte_size(Bin), Acc);
+gen_result([{pad, Size}|Tail], Offset, Acc) ->
+    gen_result(Tail, Offset + Size, Acc);
+gen_result([{msg, MsgId, Msg}|Tail], Offset, Acc) ->
+    Size = 9 + 16 + byte_size(Msg),
+    %% Only the first MsgId found is returned when duplicates exist.
+    case lists:keymember(MsgId, 1, Acc) of
+        false ->
+            gen_result(Tail, Offset + Size, [{MsgId, Size, Offset}|Acc]);
+        true ->
+            gen_result(Tail, Offset + Size, Acc)
+    end.
+
+%% -------------------------------------------------------------------
 %% Backing queue.
 %% -------------------------------------------------------------------
 
@@ -565,10 +714,7 @@ bq_queue_index(Config) ->
       ?MODULE, bq_queue_index1, [Config]).
 
 index_mod() ->
-    case application:get_env(rabbit, classic_queue_default_version) of
-        {ok, 1} -> rabbit_queue_index;
-        {ok, 2} -> rabbit_classic_queue_index_v2
-    end.
+    rabbit_classic_queue_index_v2.
 
 bq_queue_index1(_Config) ->
     init_queue_index(),
@@ -581,10 +727,7 @@ bq_queue_index1(_Config) ->
     SeqIdsC = lists:seq(0, trunc(SegmentSize/2)),
     SeqIdsD = lists:seq(0, SegmentSize*4),
 
-    VerifyReadWithPublishedFun = case IndexMod of
-        rabbit_queue_index -> fun verify_read_with_published_v1/3;
-        rabbit_classic_queue_index_v2 -> fun verify_read_with_published_v2/3
-    end,
+    VerifyReadWithPublishedFun = fun verify_read_with_published_v2/3,
 
     with_empty_test_queue(
       fun (Qi0, QName) ->
@@ -674,8 +817,7 @@ bq_queue_index1(_Config) ->
       end),
 
     %% d) get messages in all states to a segment, then flush, then do
-    %% the same again, don't flush and read. CQ v1: this will hit all
-    %% possibilities in combining the segment with the journal.
+    %% the same again, don't flush and read.
     with_empty_test_queue(
       fun (Qi0, _QName) ->
               {Qi1, [Seven,Five,Four|_]} = queue_index_publish([0,1,2,4,5,7],
@@ -702,8 +844,7 @@ bq_queue_index1(_Config) ->
               Qi10
       end),
 
-    %% e) as for (d), but use terminate instead of read, which (CQ v1) will
-    %% exercise journal_minus_segment, not segment_plus_journal.
+    %% e) as for (d), but use terminate instead of read.
     with_empty_test_queue(
       fun (Qi0, QName) ->
               {Qi1, _SeqIdsMsgIdsE} = queue_index_publish([0,1,2,4,5,7],
@@ -728,15 +869,6 @@ bq_queue_index1(_Config) ->
     {ok, _} = rabbit_variable_queue:start(?VHOST, []),
 
     passed.
-
-verify_read_with_published_v1(_Persistent, [], _) ->
-    ok;
-verify_read_with_published_v1(Persistent,
-                           [{MsgId, SeqId, _Location, _Props, Persistent}|Read],
-                           [{SeqId, MsgId}|Published]) ->
-    verify_read_with_published_v1(Persistent, Read, Published);
-verify_read_with_published_v1(_Persistent, _Read, _Published) ->
-    ko.
 
 %% The v2 index does not store the MsgId unless required.
 %% We therefore do not check it.
@@ -872,8 +1004,6 @@ bq_variable_queue_delete_msg_store_files_callback1(Config) ->
     Count = 30,
     QTState = publish_and_confirm(Q, Payload, Count),
 
-    rabbit_amqqueue:set_ram_duration_target(QPid, 0),
-
     {ok, Limiter} = rabbit_limiter:start_link(no_id),
 
     CountMinusOne = Count - 1,
@@ -965,17 +1095,16 @@ variable_queue_partial_segments_delta_thing2(VQ0, _QName) ->
     HalfSegment = SegmentSize div 2,
     OneAndAHalfSegment = SegmentSize + HalfSegment,
     VQ1 = variable_queue_publish(true, OneAndAHalfSegment, VQ0),
-    {_Duration, VQ2} = rabbit_variable_queue:ram_duration(VQ1),
+    VQ2 = rabbit_variable_queue:update_rates(VQ1),
     VQ3 = check_variable_queue_status(
-            variable_queue_set_ram_duration_target(0, VQ2),
+            VQ2,
             %% We only have one message in memory because the amount in memory
             %% depends on the consume rate, which is nil in this test.
             [{delta, {delta, 1, OneAndAHalfSegment - 1, 0, OneAndAHalfSegment}},
              {q3, 1},
              {len, OneAndAHalfSegment}]),
-    VQ4 = variable_queue_set_ram_duration_target(infinity, VQ3),
     VQ5 = check_variable_queue_status(
-            variable_queue_publish(true, 1, VQ4),
+            variable_queue_publish(true, 1, VQ3),
             %% one alpha, but it's in the same segment as the deltas
             %% @todo That's wrong now! v1/v2
             [{delta, {delta, 1, OneAndAHalfSegment, 0, OneAndAHalfSegment + 1}},
@@ -1012,9 +1141,8 @@ variable_queue_all_the_bits_not_covered_elsewhere_A2(VQ0, QName) ->
     Count = 2 * IndexMod:next_segment_boundary(0),
     VQ1 = variable_queue_publish(true, Count, VQ0),
     VQ2 = variable_queue_publish(false, Count, VQ1),
-    VQ3 = variable_queue_set_ram_duration_target(0, VQ2),
     {VQ4, _AckTags}  = variable_queue_fetch(Count, true, false,
-                                            Count + Count, VQ3),
+                                            Count + Count, VQ2),
     {VQ5, _AckTags1} = variable_queue_fetch(Count, false, false,
                                             Count, VQ4),
     _VQ6 = rabbit_variable_queue:terminate(shutdown, VQ5),
@@ -1022,8 +1150,7 @@ variable_queue_all_the_bits_not_covered_elsewhere_A2(VQ0, QName) ->
     {{_Msg1, true, _AckTag1}, VQ8} = rabbit_variable_queue:fetch(true, VQ7),
     Count1 = rabbit_variable_queue:len(VQ8),
     VQ9 = variable_queue_publish(false, 1, VQ8),
-    VQ10 = variable_queue_set_ram_duration_target(0, VQ9),
-    {VQ11, _AckTags2} = variable_queue_fetch(Count1, true, true, Count, VQ10),
+    {VQ11, _AckTags2} = variable_queue_fetch(Count1, true, true, Count, VQ9),
     {VQ12, _AckTags3} = variable_queue_fetch(1, false, false, 1, VQ11),
     VQ12.
 
@@ -1036,8 +1163,7 @@ variable_queue_all_the_bits_not_covered_elsewhere_B1(Config) ->
       fun variable_queue_all_the_bits_not_covered_elsewhere_B2/2,
       ?config(variable_queue_type, Config)).
 
-variable_queue_all_the_bits_not_covered_elsewhere_B2(VQ0, QName) ->
-    VQ1 = variable_queue_set_ram_duration_target(0, VQ0),
+variable_queue_all_the_bits_not_covered_elsewhere_B2(VQ1, QName) ->
     VQ2 = variable_queue_publish(false, 4, VQ1),
     {VQ3, AckTags} = variable_queue_fetch(2, false, false, 4, VQ2),
     {_Guids, VQ4} =
@@ -1218,51 +1344,6 @@ variable_queue_dropwhile_sync_restart2(VQ0, QName) ->
 
     VQ5.
 
-variable_queue_dropwhile_varying_ram_duration(Config) ->
-    passed = rabbit_ct_broker_helpers:rpc(Config, 0,
-      ?MODULE, variable_queue_dropwhile_varying_ram_duration1, [Config]).
-
-variable_queue_dropwhile_varying_ram_duration1(Config) ->
-    with_fresh_variable_queue(
-      fun variable_queue_dropwhile_varying_ram_duration2/2,
-      ?config(variable_queue_type, Config)).
-
-variable_queue_dropwhile_varying_ram_duration2(VQ0, _QName) ->
-    test_dropfetchwhile_varying_ram_duration(
-      fun (VQ1) ->
-              {_, VQ2} = rabbit_variable_queue:dropwhile(
-                           fun (_) -> false end, VQ1),
-              VQ2
-      end, VQ0).
-
-variable_queue_fetchwhile_varying_ram_duration(Config) ->
-    passed = rabbit_ct_broker_helpers:rpc(Config, 0,
-      ?MODULE, variable_queue_fetchwhile_varying_ram_duration1, [Config]).
-
-variable_queue_fetchwhile_varying_ram_duration1(Config) ->
-    with_fresh_variable_queue(
-      fun variable_queue_fetchwhile_varying_ram_duration2/2,
-      ?config(variable_queue_type, Config)).
-
-variable_queue_fetchwhile_varying_ram_duration2(VQ0, _QName) ->
-    test_dropfetchwhile_varying_ram_duration(
-      fun (VQ1) ->
-              {_, ok, VQ2} = rabbit_variable_queue:fetchwhile(
-                               fun (_) -> false end,
-                               fun (_, _, A) -> A end,
-                               ok, VQ1),
-              VQ2
-      end, VQ0).
-
-test_dropfetchwhile_varying_ram_duration(Fun, VQ0) ->
-    VQ1 = variable_queue_publish(false, 1, VQ0),
-    VQ2 = variable_queue_set_ram_duration_target(0, VQ1),
-    VQ3 = Fun(VQ2),
-    VQ4 = variable_queue_set_ram_duration_target(infinity, VQ3),
-    VQ5 = variable_queue_publish(false, 1, VQ4),
-    VQ6 = Fun(VQ5),
-    VQ6.
-
 variable_queue_ack_limiting(Config) ->
     passed = rabbit_ct_broker_helpers:rpc(Config, 0,
       ?MODULE, variable_queue_ack_limiting1, [Config]).
@@ -1281,8 +1362,8 @@ variable_queue_ack_limiting2(VQ0, _Config) ->
     Churn = Len div 32,
     VQ2 = publish_fetch_and_ack(Churn, Len, VQ1),
 
-    %% update stats for duration
-    {_Duration, VQ3} = rabbit_variable_queue:ram_duration(VQ2),
+    %% update stats
+    VQ3 = rabbit_variable_queue:update_rates(VQ2),
 
     %% fetch half the messages
     {VQ4, _AckTags} = variable_queue_fetch(Len div 2, false, false, Len, VQ3),
@@ -1291,9 +1372,7 @@ variable_queue_ack_limiting2(VQ0, _Config) ->
     %% that's the only predictable stats we got.
     VQ5 = check_variable_queue_status(VQ4, [{len, Len div 2}]),
 
-    VQ6 = variable_queue_set_ram_duration_target(0, VQ5),
-
-    VQ6.
+    VQ5.
 
 variable_queue_purge(Config) ->
     passed = rabbit_ct_broker_helpers:rpc(Config, 0,
@@ -1363,8 +1442,7 @@ variable_queue_requeue_ram_beta2(VQ0, _Config) ->
     {VQ2, AcksR} = variable_queue_fetch(Count, false, false, Count, VQ1),
     {Back, Front} = lists:split(Count div 2, AcksR),
     {_, VQ3} = rabbit_variable_queue:requeue(erlang:tl(Back), VQ2),
-    VQ4 = variable_queue_set_ram_duration_target(0, VQ3),
-    {_, VQ5} = rabbit_variable_queue:requeue([erlang:hd(Back)], VQ4),
+    {_, VQ5} = rabbit_variable_queue:requeue([erlang:hd(Back)], VQ3),
     VQ6 = requeue_one_by_one(Front, VQ5),
     {VQ7, AcksAll} = variable_queue_fetch(Count, false, true, Count, VQ6),
     {_, VQ8} = rabbit_variable_queue:ack(AcksAll, VQ7),
@@ -1403,36 +1481,6 @@ test_variable_queue_fold(Cut, Msgs, PendingMsgs, VQ0) ->
     Expected = lists:reverse(Acc), %% assertion
     VQ1.
 
-variable_queue_batch_publish(Config) ->
-    passed = rabbit_ct_broker_helpers:rpc(Config, 0,
-      ?MODULE, variable_queue_batch_publish1, [Config]).
-
-variable_queue_batch_publish1(Config) ->
-    with_fresh_variable_queue(
-      fun variable_queue_batch_publish2/2,
-      ?config(variable_queue_type, Config)).
-
-variable_queue_batch_publish2(VQ, _Config) ->
-    Count = 10,
-    VQ1 = variable_queue_batch_publish(true, Count, VQ),
-    Count = rabbit_variable_queue:len(VQ1),
-    VQ1.
-
-variable_queue_batch_publish_delivered(Config) ->
-    passed = rabbit_ct_broker_helpers:rpc(Config, 0,
-      ?MODULE, variable_queue_batch_publish_delivered1, [Config]).
-
-variable_queue_batch_publish_delivered1(Config) ->
-    with_fresh_variable_queue(
-      fun variable_queue_batch_publish_delivered2/2,
-      ?config(variable_queue_type, Config)).
-
-variable_queue_batch_publish_delivered2(VQ, _Config) ->
-    Count = 10,
-    VQ1 = variable_queue_batch_publish_delivered(true, Count, VQ),
-    Count = rabbit_variable_queue:depth(VQ1),
-    VQ1.
-
 %% same as test_variable_queue_requeue_ram_beta but randomly changing
 %% the queue mode after every step.
 variable_queue_mode_change(Config) ->
@@ -1454,8 +1502,7 @@ variable_queue_mode_change2(VQ0, _Config) ->
     {Back, Front} = lists:split(Count div 2, AcksR),
     {_, VQ5} = rabbit_variable_queue:requeue(erlang:tl(Back), VQ4),
     VQ6 = maybe_switch_queue_mode(VQ5),
-    VQ7 = variable_queue_set_ram_duration_target(0, VQ6),
-    VQ8 = maybe_switch_queue_mode(VQ7),
+    VQ8 = maybe_switch_queue_mode(VQ6),
     {_, VQ9} = rabbit_variable_queue:requeue([erlang:hd(Back)], VQ8),
     VQ10 = maybe_switch_queue_mode(VQ9),
     VQ11 = requeue_one_by_one(Front, VQ10),
@@ -1609,7 +1656,7 @@ publish_and_confirm(Q, Payload, Count) ->
                                          Payload),
               Content = BMsg#basic_message.content,
               Ex = BMsg#basic_message.exchange_name,
-              Msg = mc_amqpl:message(Ex, <<>>, Content),
+              {ok, Msg} = mc_amqpl:message(Ex, <<>>, Content),
               Options = #{correlation => Seq},
               {ok, Acc, _Actions} = rabbit_queue_type:deliver([Q], Msg,
                                                               Options, Acc0),
@@ -1682,43 +1729,8 @@ variable_queue_publish(IsPersistent, Start, Count, PropFun, PayloadFun, VQ) ->
                 rabbit_variable_queue:publish(
                   Msg,
                   PropFun(N, #message_properties{size = 10}),
-                  false, self(), noflow, VQN)
+                  false, self(), VQN)
         end, VQ, lists:seq(Start, Start + Count - 1))).
-
-variable_queue_batch_publish(IsPersistent, Count, VQ) ->
-    variable_queue_batch_publish(IsPersistent, Count, fun (_N, P) -> P end, VQ).
-
-variable_queue_batch_publish(IsPersistent, Count, PropFun, VQ) ->
-    variable_queue_batch_publish(IsPersistent, 1, Count, PropFun,
-                                 fun (_N) -> <<>> end, VQ).
-
-variable_queue_batch_publish(IsPersistent, Start, Count, PropFun, PayloadFun, VQ) ->
-    variable_queue_batch_publish0(IsPersistent, Start, Count, PropFun,
-                                  PayloadFun, fun make_publish/4,
-                                  fun rabbit_variable_queue:batch_publish/4,
-                                  VQ).
-
-variable_queue_batch_publish_delivered(IsPersistent, Count, VQ) ->
-    variable_queue_batch_publish_delivered(IsPersistent, Count, fun (_N, P) -> P end, VQ).
-
-variable_queue_batch_publish_delivered(IsPersistent, Count, PropFun, VQ) ->
-    variable_queue_batch_publish_delivered(IsPersistent, 1, Count, PropFun,
-                                           fun (_N) -> <<>> end, VQ).
-
-variable_queue_batch_publish_delivered(IsPersistent, Start, Count, PropFun, PayloadFun, VQ) ->
-    variable_queue_batch_publish0(IsPersistent, Start, Count, PropFun,
-                                  PayloadFun, fun make_publish_delivered/4,
-                                  fun rabbit_variable_queue:batch_publish_delivered/4,
-                                  VQ).
-
-variable_queue_batch_publish0(IsPersistent, Start, Count, PropFun, PayloadFun,
-                              MakePubFun, PubFun, VQ) ->
-    Publishes =
-        [MakePubFun(IsPersistent, PayloadFun, PropFun, N)
-         || N <- lists:seq(Start, Start + Count - 1)],
-    Res = PubFun(Publishes, self(), noflow, VQ),
-    VQ1 = pub_res(Res),
-    variable_queue_wait_for_shuffling_end(VQ1).
 
 variable_queue_fetch(Count, IsPersistent, IsDelivered, Len, VQ) ->
     lists:foldl(fun (N, {VQN, AckTagsAcc}) ->
@@ -1745,10 +1757,6 @@ assert_props(List, PropVals) ->
         [ok] -> ok;
         Error -> error(Error -- [ok])
     end.
-
-variable_queue_set_ram_duration_target(Duration, VQ) ->
-    variable_queue_wait_for_shuffling_end(
-      rabbit_variable_queue:set_ram_duration_target(Duration, VQ)).
 
 publish_fetch_and_ack(0, _Len, VQ0) ->
     VQ0;
@@ -1802,8 +1810,7 @@ variable_queue_with_holes(VQ0) ->
     VQ1 = variable_queue_publish(
             false, 1, Count,
             fun (_, P) -> P end, fun erlang:term_to_binary/1, VQ0),
-    VQ2 = variable_queue_set_ram_duration_target(0, VQ1),
-    {VQ3, AcksR} = variable_queue_fetch(Count, false, false, Count, VQ2),
+    {VQ3, AcksR} = variable_queue_fetch(Count, false, false, Count, VQ1),
     Acks = lists:reverse(AcksR),
     AckSeqs = lists:zip(Acks, Seq),
     [{Subset1, _Seq1}, {Subset2, _Seq2}, {Subset3, Seq3}] =
@@ -1815,11 +1822,10 @@ variable_queue_with_holes(VQ0) ->
     VQ5 = requeue_one_by_one(Subset1, VQ4),
     %% by now we have some messages (and holes) in delta
     VQ6 = requeue_one_by_one(Subset2, VQ5),
-    VQ7 = variable_queue_set_ram_duration_target(infinity, VQ6),
     %% add the q1 tail
     VQ8 = variable_queue_publish(
             true, Count + 1, Interval,
-            fun (_, P) -> P end, fun erlang:term_to_binary/1, VQ7),
+            fun (_, P) -> P end, fun erlang:term_to_binary/1, VQ6),
     %% assertions
     vq_with_holes_assertions(VQ8),
     Depth = Count + Interval,
@@ -1863,4 +1869,5 @@ message(IsPersistent, PayloadFun, N) ->
                                                                   false -> 1
                                                               end},
                              PayloadFun(N)),
-    mc_amqpl:message(Ex, <<>>, Content, #{id => Id}).
+        {ok, Msg} = mc_amqpl:message(Ex, <<>>, Content, #{id => Id}),
+        Msg.

@@ -14,6 +14,7 @@
          is_persistent/1,
          ttl/1,
          correlation_id/1,
+         user_id/1,
          message_id/1,
          timestamp/1,
          priority/1,
@@ -25,10 +26,9 @@
          protocol_state/1,
          %serialize/1,
          prepare/2,
-         record_death/3,
+         record_death/4,
          is_death_cycle/2,
          %deaths/1,
-         last_death/1,
          death_queue_names/1
          ]).
 
@@ -49,18 +49,20 @@ is(_) ->
     false.
 
 -spec get_annotation(mc:ann_key(), state()) -> mc:ann_value() | undefined.
-get_annotation(routing_keys, #basic_message{routing_keys = RKeys}) ->
+get_annotation(?ANN_ROUTING_KEYS, #basic_message{routing_keys = RKeys}) ->
     RKeys;
-get_annotation(exchange, #basic_message{exchange_name = Ex}) ->
+get_annotation(?ANN_EXCHANGE, #basic_message{exchange_name = Ex}) ->
     Ex#resource.name;
 get_annotation(id, #basic_message{id = Id}) ->
-    Id.
+    Id;
+get_annotation(_Key, #basic_message{}) ->
+    undefined.
 
 set_annotation(id, Value, #basic_message{} = Msg) ->
     Msg#basic_message{id = Value};
-set_annotation(routing_keys, Value, #basic_message{} = Msg) ->
+set_annotation(?ANN_ROUTING_KEYS, Value, #basic_message{} = Msg) ->
     Msg#basic_message{routing_keys = Value};
-set_annotation(exchange, Value, #basic_message{exchange_name = Ex} = Msg) ->
+set_annotation(?ANN_EXCHANGE, Value, #basic_message{exchange_name = Ex} = Msg) ->
     Msg#basic_message{exchange_name = Ex#resource{name = Value}};
 set_annotation(<<"x-", _/binary>> = Key, Value,
                #basic_message{content = Content0} = Msg) ->
@@ -88,7 +90,7 @@ set_annotation(<<"x-", _/binary>> = Key, Value,
     Msg#basic_message{content = C};
 set_annotation(<<"timestamp_in_ms">> = Name, Value, #basic_message{} = Msg) ->
     rabbit_basic:add_header(Name, long, Value, Msg);
-set_annotation(timestamp, Millis,
+set_annotation(?ANN_TIMESTAMP, Millis,
                #basic_message{content = #content{properties = B} = C0} = Msg) ->
     C = C0#content{properties = B#'P_basic'{timestamp = Millis div 1000},
                    properties_bin = none},
@@ -104,6 +106,9 @@ timestamp(#basic_message{content = Content}) ->
     get_property(?FUNCTION_NAME, Content).
 
 priority(#basic_message{content = Content}) ->
+    get_property(?FUNCTION_NAME, Content).
+
+user_id(#basic_message{content = Content}) ->
     get_property(?FUNCTION_NAME, Content).
 
 correlation_id(#basic_message{content = Content}) ->
@@ -152,7 +157,7 @@ prepare(store, Msg) ->
 record_death(Reason, SourceQueue,
              #basic_message{content = Content,
                             exchange_name = Exchange,
-                            routing_keys = RoutingKeys} = Msg) ->
+                            routing_keys = RoutingKeys} = Msg, _Env) ->
     % HeadersFun1 = fun (H) -> lists:keydelete(<<"CC">>, 1, H) end,
     ReasonBin = atom_to_binary(Reason),
     TimeSec = os:system_time(seconds),
@@ -357,26 +362,6 @@ death_queue_names(#basic_message{content = Content}) ->
             []
     end.
 
-last_death(#basic_message{content = Content}) ->
-    #content{properties = #'P_basic'{headers = Headers}} =
-        rabbit_binary_parser:ensure_content_decoded(Content),
-    %% TODO: review this conversion and/or change the API
-    case rabbit_misc:table_lookup(Headers, <<"x-death">>) of
-        {array, [{table, Info} | _]} ->
-            X = x_death_event_key(Info, <<"exchange">>),
-            Q = x_death_event_key(Info, <<"queue">>),
-            T = x_death_event_key(Info, <<"time">>, 0),
-            Keys = x_death_event_key(Info, <<"routing_keys">>),
-            Count = x_death_event_key(Info, <<"count">>),
-            {Q, #death{exchange = X,
-                       anns = #{first_time => T * 1000,
-                                last_time => T * 1000},
-                       routing_keys = Keys,
-                       count = Count}};
-        _ ->
-            undefined
-    end.
-
 get_property(P, #content{properties = none} = Content) ->
     %% this is inefficient but will only apply to old messages that are
     %% not containerized
@@ -384,6 +369,13 @@ get_property(P, #content{properties = none} = Content) ->
 get_property(durable,
              #content{properties = #'P_basic'{delivery_mode = Mode}}) ->
     Mode == 2;
+get_property(user_id,
+             #content{properties = #'P_basic'{user_id = UserId}}) ->
+    if UserId =:= undefined ->
+           undefined;
+       is_binary(UserId) ->
+           {binary, UserId}
+    end;
 get_property(ttl, #content{properties = Props}) ->
     {ok, MsgTTL} = rabbit_basic:parse_expiration(Props),
     MsgTTL;

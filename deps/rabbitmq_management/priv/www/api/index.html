@@ -56,6 +56,13 @@
     with the <code>columns</code> parameter. This is a comma-separated
     list of subfields separated by dots. See the example below.</p>
 
+    <p> It is possible to disable the statistics in the GET requests
+      and obtain just the basic information of every object. This reduces
+      considerably the amount of data returned and the memory and resource
+      consumption of each query in the system. For some monitoring and operation
+      purposes, these queries are more appropiate. The query string parameter
+    <code>disable_stats</code> set to <code>true</code> will achieve this.</p>
+
     <p>Most of the GET queries return many fields per
     object. The second part of this guide covers those.</p>
 
@@ -209,10 +216,17 @@ vary: accept, accept-encoding, origin</pre>
         <td></td>
         <td class="path">/api/nodes/<i>name</i></td>
         <td>
-          An individual node in the RabbitMQ cluster. Add
-          "?memory=true" to get memory statistics, and "?binary=true"
-          to get a breakdown of binary memory use (may be expensive if
-          there are many small binaries in the system).
+          Returns information about an individual node in the RabbitMQ cluster.
+        </td>
+      </tr>
+      <tr>
+        <td>X</td>
+        <td></td>
+        <td></td>
+        <td></td>
+        <td class="path">/api/nodes/<i>name</i>/memory</td>
+        <td>
+          Returns a <a href="https://rabbitmq.com/memory-use.html">memory usage breakdown</a> of an individual node in the RabbitMQ cluster.
         </td>
       </tr>
       <tr>
@@ -478,7 +492,21 @@ vary: accept, accept-encoding, origin</pre>
         <td></td>
         <td></td>
         <td class="path">/api/queues</td>
-        <td>A list of all queues. Use <a href="#pagination">pagination parameters</a> to filter queues.</td>
+        <td>A list of all queues returning a reduced set of fields. Use <a href="#pagination">pagination parameters</a> to filter queues.
+          The parameter <code>enable_queue_totals=true</code> can be used in combination with the
+          <code>disable_stats=true</code> parameter to return a reduced set of fields and significantly
+          reduce the amount of data returned by this endpoint. That in turn can significantly reduce
+          CPU and bandwidth footprint of such requests.
+        </td>
+      </tr>
+      <tr>
+        <td>X</td>
+        <td></td>
+        <td></td>
+        <td></td>
+        <td class="path">/api/queues/detailed</td>
+        <td>A list of all queues containing all available information about the queues. Use <a href="#pagination">pagination parameters</a> to filter queues.
+        </td>
       </tr>
       <tr>
         <td>X</td>
@@ -531,9 +559,7 @@ vary: accept, accept-encoding, origin</pre>
         <td>X</td>
         <td class="path">/api/queues/<i>vhost</i>/<i>name</i>/actions</td>
         <td>
-          Actions that can be taken on a queue. POST a body like:
-          <pre>{"action":"sync"}</pre> Currently the actions which are
-          supported are <code>sync</code> and <code>cancel_sync</code>.
+          Actions that can be taken on a queue. Currently no actions are supported.
         </td>
       </tr>
 
@@ -739,7 +765,7 @@ vary: accept, accept-encoding, origin</pre>
         <td>An individual user. To PUT a user, you will need a body looking something like this:
 <pre>{"password":"secret","tags":"administrator"}</pre>
 or:
-<pre>{"password_hash":"2lmoth8l4H0DViLaK9Fxi6l9ds8=", "tags":"administrator"}</pre>
+<pre>{"password_hash":"2lmoth8l4H0DViLaK9Fxi6l9ds8=", "tags":["administrator"]}</pre>
         The <code>tags</code> key is mandatory. Either
         <code>password</code> or <code>password_hash</code>
         can be set. If neither are set the user will not be able to log in with a password,
@@ -1048,19 +1074,6 @@ or:
         <td></td>
         <td></td>
         <td></td>
-        <td class="path">/api/health/checks/node-is-mirror-sync-critical</td>
-        <td>
-          Checks if there are classic mirrored queues without synchronised mirrors online
-          (queues that would potentially lose data if the target node is shut down).
-          Responds a 200 OK if there are no such classic mirrored queues,
-          otherwise responds with a 503 Service Unavailable.
-        </td>
-      </tr>
-      <tr>
-        <td>X</td>
-        <td></td>
-        <td></td>
-        <td></td>
         <td class="path">/api/health/checks/node-is-quorum-critical</td>
         <td>
           Checks if there are quorum queues with minimum online quorum (queues that
@@ -1288,6 +1301,36 @@ or:
             The list of stream consumers in a specific virtual host.
             <br />
             Requires the <code>rabbitmq_stream_management</code> plugin to be enabled.
+        </td>
+      </tr>
+      <tr>
+        <td>X</td>
+        <td></td>
+        <td></td>
+        <td></td>
+        <td class="path">/api/feature-flags</td>
+        <td>
+            The list of feature flags.
+        </td>
+      </tr>
+      <tr>
+        <td>X</td>
+        <td></td>
+        <td></td>
+        <td></td>
+        <td class="path">/api/deprecated-features</td>
+        <td>
+            The list of deprecated features.
+        </td>
+      </tr>
+      <tr>
+        <td>X</td>
+        <td></td>
+        <td></td>
+        <td></td>
+        <td class="path">/api/deprecated-features/used</td>
+        <td>
+            The list of deprecated features currently being used.
         </td>
       </tr>
     </table>
@@ -1950,12 +1993,6 @@ or:
         </td>
       </tr>
       <tr>
-        <td><code>processors</code></td>
-        <td>
-          Number of cores detected and usable by Erlang.
-        </td>
-      </tr>
-      <tr>
         <td><code>queue_index_journal_write_count</code></td>
         <td>
           Number of records written to the queue index journal. Each
@@ -2002,18 +2039,6 @@ or:
         </td>
       </tr>
       <tr>
-        <td><code>sockets_total</code></td>
-        <td>
-          File descriptors available for use as sockets.
-        </td>
-      </tr>
-      <tr>
-        <td><code>sockets_used</code></td>
-        <td>
-          File descriptors used as sockets.
-        </td>
-      </tr>
-      <tr>
         <td><code>type</code></td>
         <td>
           'disc' or 'ram'.
@@ -2023,6 +2048,12 @@ or:
         <td><code>uptime</code></td>
         <td>
           Time since the Erlang VM started, in milliseconds.
+        </td>
+      </tr>
+      <tr>
+        <td><code>processors</code></td>
+        <td>
+          Number of logical CPU cores used by RabbitMQ.
         </td>
       </tr>
     </table>
@@ -2158,6 +2189,85 @@ or:
     </table>
 
     <h2>/api/queues</h2>
+
+    When using the query parameters combination of <code>disable_stats</code> and
+    <code>enable_queue_totals</code> this query returns the following fields:
+
+    <table>
+      <tr>
+        <td><code>name</code></td>
+        <td>
+          The name of the queue.
+        </td>
+      </tr>
+      <tr>
+        <td><code>vhost</code></td>
+        <td>
+          The name of the virtual host.
+        </td>
+      </tr>
+      <tr>
+        <td><code>type</code></td>
+        <td>
+          The type of the queue.
+        </td>
+      </tr>
+      <tr>
+        <td><code>node</code></td>
+        <td>
+          Depending on the type of the queue, this is the node which holds the queue or hosts the leader.
+        </td>
+      </tr>
+      <tr>
+        <td><code>state</code></td>
+        <td>
+          The status of the queue.
+        </td>
+      </tr>
+      <tr>
+        <td><code>arguments</code></td>
+        <td>
+          The arguments of the queue.
+        </td>
+      </tr>
+      <tr>
+        <td><code>auto_delete</code></td>
+        <td>
+          The value of the <code>auto_delete</code> argument.
+        </td>
+      </tr>
+      <tr>
+        <td><code>durable</code></td>
+        <td>
+          The value of the <code>durable</code> argument.
+        </td>
+      </tr>
+      <tr>
+        <td><code>exclusive</code></td>
+        <td>
+          The value of the <code>exclusive</code> argument.
+        </td>
+      </tr>
+      <tr>
+        <td><code>messages</code></td>
+        <td>
+          The total number of messages in the queue.
+        </td>
+      </tr>
+      <tr>
+        <td><code>messages_ready</code></td>
+        <td>
+          The number of messages ready to be delivered in the queue.
+        </td>
+      </tr>
+      <tr>
+        <td><code>messages_unacknowledged</code></td>
+        <td>
+          The number of messages waiting for acknowledgement in the queue.
+        </td>
+      </tr>
+    </table>
+
     <h2>/api/queues/(vhost)</h2>
 
     <p>

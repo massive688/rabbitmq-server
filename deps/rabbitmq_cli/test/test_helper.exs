@@ -2,7 +2,7 @@
 ## License, v. 2.0. If a copy of the MPL was not distributed with this
 ## file, You can obtain one at https://mozilla.org/MPL/2.0/.
 ##
-## Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+## Copyright (c) 2007-2023 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.  All rights reserved.
 
 ten_minutes = 10 * 60 * 1000
 
@@ -12,7 +12,14 @@ ExUnit.configure(
   timeout: ten_minutes
 )
 
-ExUnit.start()
+if System.get_env("BAZEL_TEST") == "1" do
+  ExUnit.configure(seed: 0)
+  :application.ensure_all_started(:mix)
+  :application.ensure_all_started(:rabbitmqctl)
+  ExUnit.start(trace: true)
+else
+  ExUnit.start()
+end
 
 # Elixir 1.15 compiler optimizations seem to require that we explicitly add to the code path
 true = Code.append_path(Path.join([System.get_env("DEPS_DIR"), "rabbit_common", "ebin"]))
@@ -215,8 +222,8 @@ defmodule TestHelper do
     :rpc.call(get_rabbit_hostname(), :rabbit_policy, :list_formatted, [vhost])
   end
 
-  def set_policy(vhost, name, pattern, value) do
-    {:ok, decoded} = :rabbit_json.try_decode(value)
+  def set_policy(vhost, name, pattern, definition) do
+    {:ok, decoded} = :rabbit_json.try_decode(definition)
     parsed = :maps.to_list(decoded)
 
     :ok =
@@ -227,6 +234,22 @@ defmodule TestHelper do
         parsed,
         0,
         "all",
+        "acting-user"
+      ])
+  end
+
+  def set_policy(vhost, name, pattern, definition, priority, apply_to) do
+    {:ok, decoded} = :rabbit_json.try_decode(definition)
+    parsed = :maps.to_list(decoded)
+
+    :ok =
+      :rpc.call(get_rabbit_hostname(), :rabbit_policy, :set, [
+        vhost,
+        name,
+        pattern,
+        parsed,
+        priority,
+        apply_to,
         "acting-user"
       ])
   end
@@ -526,7 +549,7 @@ defmodule TestHelper do
   end
 
   def await_no_client_connections_with_iterations(node, n) when n > 0 do
-    case :rpc.call(node, :rabbit_networking, :connections_local, []) do
+    case :rpc.call(node, :rabbit_networking, :local_connections, []) do
       [] ->
         :ok
 
@@ -545,13 +568,13 @@ defmodule TestHelper do
   end
 
   def close_all_connections(node) do
-    # we intentionally use connections_local/0 here because connections/0,
+    # we intentionally use local_connections/0 here because connections/0,
     # the cluster-wide version, loads some bits around cluster membership
     # that are not normally ready with a single node. MK.
     #
     # when/if we decide to test
     # this project against a cluster of nodes this will need revisiting. MK.
-    for pid <- :rpc.call(node, :rabbit_networking, :connections_local, []) do
+    for pid <- :rpc.call(node, :rabbit_networking, :local_connections, []) do
       :rpc.call(node, :rabbit_networking, :close_connection, [pid, :force_closed])
     end
 

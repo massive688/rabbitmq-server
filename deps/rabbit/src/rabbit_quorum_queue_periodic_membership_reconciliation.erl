@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2024 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_quorum_queue_periodic_membership_reconciliation).
@@ -101,7 +101,7 @@ handle_cast(_Msg, State) ->
 
 handle_info(?EVAL_MSG, #state{interval = Interval,
                               trigger_interval = TriggerInterval} = State) ->
-    Res = reconclitiate_quorum_queue_membership(State),
+    Res = reconciliate_quorum_queue_membership(State),
     NewTimeout = case Res of
                      noop ->
                          Interval;
@@ -125,15 +125,20 @@ code_change(_OldVsn, State, _Extra) ->
 %% Internal functions
 %%----------------------------------------------------------------------------
 
-reconclitiate_quorum_queue_membership(State) ->
+reconciliate_quorum_queue_membership(State) ->
     LocalLeaders = rabbit_amqqueue:list_local_leaders(),
     ExpectedNodes = rabbit_nodes:list_members(),
     Running = rabbit_nodes:list_running(),
-    reconclitiate_quorum_members(ExpectedNodes, Running, LocalLeaders, State, noop).
+    reconciliate_quorum_members(ExpectedNodes, Running, LocalLeaders, State, noop).
 
-reconclitiate_quorum_members(_ExpectedNodes, _Running, [], _State, Result) ->
+reconciliate_quorum_members([], _Running, _, _State, Result) ->
+    %% if there are no expected nodes rabbit_nodes:list_running/0 encountered
+    %% an error during query and returned the empty list which is case we need
+    %% to handle
     Result;
-reconclitiate_quorum_members(ExpectedNodes, Running, [Q | LocalLeaders],
+reconciliate_quorum_members(_ExpectedNodes, _Running, [], _State, Result) ->
+    Result;
+reconciliate_quorum_members(ExpectedNodes, Running, [Q | LocalLeaders],
                              #state{target_group_size = TargetSize} = State,
                              OldResult) ->
     Result =
@@ -158,7 +163,7 @@ reconclitiate_quorum_members(ExpectedNodes, Running, [Q | LocalLeaders],
             _ ->
                 noop
         end,
-    reconclitiate_quorum_members(ExpectedNodes, Running, LocalLeaders, State,
+    reconciliate_quorum_members(ExpectedNodes, Running, LocalLeaders, State,
                                  update_result(OldResult, Result)).
 
 maybe_remove(_, #state{auto_remove = false}) ->

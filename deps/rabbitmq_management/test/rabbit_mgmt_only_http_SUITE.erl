@@ -2,13 +2,12 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2016-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2024 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_mgmt_only_http_SUITE).
 
 -include_lib("amqp_client/include/amqp_client.hrl").
--include_lib("common_test/include/ct.hrl").
 -include_lib("eunit/include/eunit.hrl").
 -include_lib("rabbitmq_ct_helpers/include/rabbit_mgmt_test.hrl").
 
@@ -29,9 +28,10 @@
 
 -import(rabbit_misc, [pget/2]).
 
--define(COLLECT_INTERVAL, 1000).
+-define(COLLECT_INTERVAL, 256).
 -define(PATH_PREFIX, "/custom-prefix").
 
+-compile(nowarn_export_all).
 -compile(export_all).
 
 all() ->
@@ -43,20 +43,23 @@ all() ->
 
 groups() ->
     [
-     {all_tests_with_prefix, [], all_tests()},
-     {all_tests_without_prefix, [], all_tests()},
+     {all_tests_with_prefix, [], some_tests() ++ all_tests()},
+     {all_tests_without_prefix, [], some_tests()},
      {stats_disabled_on_request, [], [disable_with_disable_stats_parameter_test]},
      {invalid_config, [], [invalid_config_test]}
     ].
 
-all_tests() -> [
+some_tests() ->
+    [
     overview_test,
     nodes_test,
     vhosts_test,
     connections_test,
     exchanges_test,
-    queues_test,
-    mirrored_queues_test,
+    queues_test
+    ].
+
+all_tests() -> [
     quorum_queues_test,
     permissions_vhost_test,
     permissions_connection_channel_consumer_test,
@@ -84,9 +87,13 @@ all_tests() -> [
 %% -------------------------------------------------------------------
 merge_app_env(Config, DisableStats) ->
     Config1 = rabbit_ct_helpers:merge_app_env(Config,
-                                    {rabbit, [
-                                              {collect_statistics_interval, ?COLLECT_INTERVAL}
-                                             ]}),
+                                              {rabbit,
+                                               [
+                                                {collect_statistics_interval,
+                                                 ?COLLECT_INTERVAL},
+                                                {quorum_tick_interval, 256},
+                                                {stream_tick_interval, 256}
+                                               ]}),
     rabbit_ct_helpers:merge_app_env(Config1,
                                     {rabbitmq_management, [
                                      {disable_management_stats, DisableStats},
@@ -122,12 +129,10 @@ init_per_group(all_tests_with_prefix = Group, Config0) ->
     PathConfig = {rabbitmq_management, [{path_prefix, ?PATH_PREFIX}]},
     Config1 = rabbit_ct_helpers:merge_app_env(Config0, PathConfig),
     Config2 = finish_init(Group, Config1),
-    Config3 = start_broker(Config2),
-    Config3;
+    start_broker(Config2);
 init_per_group(Group, Config0) ->
     Config1 = finish_init(Group, Config0),
-    Config2 = start_broker(Config1),
-    Config2.
+    start_broker(Config1).
 
 end_per_group(_, Config) ->
     inets:stop(),
@@ -309,7 +314,7 @@ connections_test(Config) ->
                           false
                   end
           end,
-    wait_until(Fun, 60),
+    await_condition(Fun),
     close_connection(Conn),
     passed.
 
@@ -401,8 +406,8 @@ queues_test(Config) ->
              ?BAD_REQUEST),
 
     Policy = [{pattern,    <<"baz">>},
-              {definition, [{<<"ha-mode">>, <<"all">>}]}],
-    http_put(Config, "/policies/%2F/HA", Policy, {group, '2xx'}),
+              {definition, [{<<"max-length">>, 100}]}],
+    http_put(Config, "/policies/%2F/length", Policy, {group, '2xx'}),
     http_put(Config, "/queues/%2F/baz", Good, {group, '2xx'}),
     Queues = http_get(Config, "/queues/%2F"),
     Queue = http_get(Config, "/queues/%2F/foo"),
@@ -414,9 +419,7 @@ queues_test(Config) ->
                    auto_delete => false,
                    exclusive   => false,
                    arguments   => #{},
-                   node        => NodeBin,
-                   slave_nodes => [],
-                   synchronised_slave_nodes => []},
+                   node        => NodeBin},
                  #{name        => <<"foo">>,
                    vhost       => <<"/">>,
                    durable     => true,
@@ -461,8 +464,8 @@ queues_enable_totals_test(Config) ->
     http_put(Config, "/queues/%2F/foo", GoodQQ, {group, '2xx'}),
 
     Policy = [{pattern,    <<"baz">>},
-              {definition, [{<<"ha-mode">>, <<"all">>}]}],
-    http_put(Config, "/policies/%2F/HA", Policy, {group, '2xx'}),
+              {definition, [{<<"max-length">>, 100}]}],
+    http_put(Config, "/policies/%2F/length", Policy, {group, '2xx'}),
     http_put(Config, "/queues/%2F/baz", Good, {group, '2xx'}),
 
     {Conn, Ch} = open_connection_and_channel(Config),
@@ -480,7 +483,7 @@ queues_enable_totals_test(Config) ->
                   length(rabbit_ct_broker_helpers:rpc(Config, 0, ets, tab2list,
                                                       [queue_coarse_metrics])) == 2
           end,
-    wait_until(Fun, 60),
+    await_condition(Fun),
 
     Queues = http_get(Config, "/queues/%2F"),
     Queue = http_get(Config, "/queues/%2F/foo"),
@@ -494,11 +497,9 @@ queues_enable_totals_test(Config) ->
                    exclusive   => false,
                    arguments   => #{},
                    node        => NodeBin,
-                   slave_nodes => [],
                    messages    => 1,
                    messages_ready => 1,
-                   messages_unacknowledged => 0,
-                   synchronised_slave_nodes => []},
+                   messages_unacknowledged => 0},
                  #{name        => <<"foo">>,
                    vhost       => <<"/">>,
                    durable     => true,
@@ -514,14 +515,14 @@ queues_enable_totals_test(Config) ->
                   vhost       => <<"/">>,
                   durable     => true,
                   auto_delete => false,
-                  exclusive   => false,
+                  exclusive   => null,
                   arguments   => #{'x-queue-type' => <<"quorum">>},
                   leader      => NodeBin,
+                  messages    => 2,
+                  messages_ready => 2,
+                  messages_unacknowledged => 0,
                   members     => [NodeBin]}, Queue),
 
-    ?assert(not maps:is_key(messages, Queue)),
-    ?assert(not maps:is_key(messages_ready, Queue)),
-    ?assert(not maps:is_key(messages_unacknowledged, Queue)),
     ?assert(not maps:is_key(message_stats, Queue)),
     ?assert(not maps:is_key(messages_details, Queue)),
     ?assert(not maps:is_key(reductions_details, Queue)),
@@ -531,41 +532,6 @@ queues_enable_totals_test(Config) ->
     close_connection(Conn),
 
     passed.
-
-mirrored_queues_test(Config) ->
-    Policy = [{pattern,    <<".*">>},
-              {definition, [{<<"ha-mode">>, <<"all">>}]}],
-    http_put(Config, "/policies/%2F/HA", Policy, {group, '2xx'}),
-
-    Good = [{durable, true}, {arguments, []}],
-    http_get(Config, "/queues/%2f/ha", ?NOT_FOUND),
-    http_put(Config, "/queues/%2f/ha", Good, {group, '2xx'}),
-
-    {Conn, Ch} = open_connection_and_channel(Config),
-    Publish = fun() ->
-                      amqp_channel:call(
-                        Ch, #'basic.publish'{exchange = <<"">>,
-                                             routing_key = <<"ha">>},
-                        #amqp_msg{payload = <<"message">>})
-              end,
-    Publish(),
-    Publish(),
-
-    Queue = http_get(Config, "/queues/%2f/ha?lengths_age=60&lengths_incr=5&msg_rates_age=60&msg_rates_incr=5&data_rates_age=60&data_rates_incr=5"),
-
-    %% It's really only one node, but the only thing that matters in this test is to verify the
-    %% key exists
-    Nodes = lists:sort(rabbit_ct_broker_helpers:get_node_configs(Config, nodename)),
-
-    ?assert(not maps:is_key(messages, Queue)),
-    ?assert(not maps:is_key(messages_details, Queue)),
-    ?assert(not maps:is_key(reductions_details, Queue)),
-    ?assert(true, lists:member(maps:get(node, Queue), Nodes)),
-    ?assertEqual([], get_nodes(slave_nodes, Queue)),
-    ?assertEqual([], get_nodes(synchronised_slave_nodes, Queue)),
-
-    http_delete(Config, "/queues/%2f/ha", {group, '2xx'}),
-    close_connection(Conn).
 
 quorum_queues_test(Config) ->
     Good = [{durable, true}, {arguments, [{'x-queue-type', 'quorum'}]}],
@@ -894,8 +860,6 @@ table_hash(Table) ->
 
 queue_actions_test(Config) ->
     http_put(Config, "/queues/%2F/q", #{}, {group, '2xx'}),
-    http_post(Config, "/queues/%2F/q/actions", [{action, sync}], {group, '2xx'}),
-    http_post(Config, "/queues/%2F/q/actions", [{action, cancel_sync}], {group, '2xx'}),
     http_post(Config, "/queues/%2F/q/actions", [{action, change_colour}], ?BAD_REQUEST),
     http_delete(Config, "/queues/%2F/q", {group, '2xx'}),
     passed.
@@ -1678,17 +1642,16 @@ publish(Ch) ->
         publish(Ch)
     end.
 
-wait_until(_Fun, 0) ->
-    ?assert(wait_failed);
-wait_until(Fun, N) ->
-    case Fun() of
-    true ->
-        timer:sleep(1500);
-    false ->
-        timer:sleep(?COLLECT_INTERVAL + 100),
-        wait_until(Fun, N - 1)
-    end.
-
 http_post_json(Config, Path, Body, Assertion) ->
     http_upload_raw(Config,  post, Path, Body, "guest", "guest",
                     Assertion, [{"Content-Type", "application/json"}]).
+
+await_condition(Fun) ->
+    rabbit_ct_helpers:await_condition(
+      fun () ->
+              try
+                  Fun()
+              catch _:_ ->
+                        false
+              end
+      end, ?COLLECT_INTERVAL * 100).

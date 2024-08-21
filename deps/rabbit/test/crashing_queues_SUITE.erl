@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2024 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(crashing_queues_SUITE).
@@ -20,9 +20,9 @@ all() ->
 groups() ->
     [
       {cluster_size_2, [], [
-          crashing_unmirrored,
-          crashing_mirrored,
-          give_up_after_repeated_crashes
+          crashing_durable,
+          give_up_after_repeated_crashes,
+          crashing_transient
         ]}
     ].
 
@@ -45,7 +45,17 @@ init_per_group(cluster_size_2, Config) ->
 end_per_group(_, Config) ->
     Config.
 
+init_per_testcase(crashing_transient = Testcase, Config) ->
+    case rabbit_ct_broker_helpers:configured_metadata_store(Config) of
+        mnesia ->
+            init_per_testcase0(Testcase, Config);
+        _ ->
+            {skip, "Transient queues not supported by Khepri"}
+    end;
 init_per_testcase(Testcase, Config) ->
+    init_per_testcase0(Testcase, Config).
+
+init_per_testcase0(Testcase, Config) ->
     rabbit_ct_helpers:testcase_started(Config, Testcase),
     ClusterSize = ?config(rmq_nodes_count, Config),
     TestNumber = rabbit_ct_helpers:testcase_number(Config, ?MODULE, Testcase),
@@ -58,36 +68,31 @@ init_per_testcase(Testcase, Config) ->
       rabbit_ct_client_helpers:setup_steps()).
 
 end_per_testcase(Testcase, Config) ->
-    Config1 = rabbit_ct_helpers:run_steps(Config,
-      rabbit_ct_client_helpers:teardown_steps() ++
-      rabbit_ct_broker_helpers:teardown_steps()),
-    rabbit_ct_helpers:testcase_finished(Config1, Testcase).
+    rabbit_ct_helpers:testcase_finished(Config, Testcase),
+    rabbit_ct_helpers:run_teardown_steps(Config, rabbit_ct_broker_helpers:teardown_steps()).
 
 %% -------------------------------------------------------------------
 %% Testcases.
 %% -------------------------------------------------------------------
 
-crashing_unmirrored(Config) ->
+crashing_durable(Config) ->
     [A, B] = rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
     ChA = rabbit_ct_client_helpers:open_channel(Config, A),
     ConnB = rabbit_ct_client_helpers:open_connection(Config, B),
-    QName = <<"crashing_unmirrored-q">>,
+    QName = <<"crashing-q">>,
     amqp_channel:call(ChA, #'confirm.select'{}),
     test_queue_failure(A, ChA, ConnB, 1, 0,
                        #'queue.declare'{queue = QName, durable = true}),
-    test_queue_failure(A, ChA, ConnB, 0, 0,
-                       #'queue.declare'{queue = QName, durable = false}),
     ok.
 
-crashing_mirrored(Config) ->
+crashing_transient(Config) ->
     [A, B] = rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
-    rabbit_ct_broker_helpers:set_ha_policy(Config, A, <<".*">>, <<"all">>),
     ChA = rabbit_ct_client_helpers:open_channel(Config, A),
     ConnB = rabbit_ct_client_helpers:open_connection(Config, B),
-    QName = <<"crashing_mirrored-q">>,
+    QName = <<"crashing-q">>,
     amqp_channel:call(ChA, #'confirm.select'{}),
-    test_queue_failure(A, ChA, ConnB, 2, 1,
-                       #'queue.declare'{queue = QName, durable = true}),
+    test_queue_failure(A, ChA, ConnB, 0, 0,
+                       #'queue.declare'{queue = QName, durable = false}),
     ok.
 
 test_queue_failure(Node, Ch, RaceConn, MsgCount, FollowerCount, Decl) ->
@@ -99,7 +104,6 @@ test_queue_failure(Node, Ch, RaceConn, MsgCount, FollowerCount, Decl) ->
         QRes = rabbit_misc:r(<<"/">>, queue, QName),
         rabbit_amqqueue:kill_queue(Node, QRes),
         assert_message_count(MsgCount, Ch, QName),
-        assert_follower_count(FollowerCount, Node, QName),
         stop_declare_racer(Racer)
     after
         amqp_channel:call(Ch, #'queue.delete'{queue = QName})
@@ -183,20 +187,3 @@ assert_message_count(Count, Ch, QName) ->
     #'queue.declare_ok'{message_count = Count} =
         amqp_channel:call(Ch, #'queue.declare'{queue   = QName,
                                                passive = true}).
-
-assert_follower_count(Count, Node, QName) ->
-    Q = lookup(Node, QName),
-    [{_, Pids}] = rpc:call(Node, rabbit_amqqueue, info, [Q, [slave_pids]]),
-    RealCount = case Pids of
-                    '' -> 0;
-                    _  -> length(Pids)
-                end,
-    case RealCount of
-        Count ->
-            ok;
-        _ when RealCount < Count ->
-            timer:sleep(10),
-            assert_follower_count(Count, Node, QName);
-        _ ->
-            exit({too_many_replicas, Count, RealCount})
-    end.

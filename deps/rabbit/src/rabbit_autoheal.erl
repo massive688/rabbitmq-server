@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2024 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_autoheal).
@@ -263,6 +263,12 @@ handle_msg({winner_is, Winner}, State = {leader_waiting, Winner, _},
     %% This node is the leader and a loser at the same time.
     Pid = restart_loser(State, Winner),
     {restarting, Pid};
+handle_msg({winner_is, Winner}, State = {winner_waiting, _OutstandingStops, _Notify},
+           _Partitions) ->
+    %% This node is still in winner_waiting with a winner reported, restart loser
+    %% and update state
+    Pid = restart_loser(State, Winner),
+    {restarting, Pid};
 
 handle_msg(Request, {restarting, Pid} = St, _Partitions) ->
     %% ignore, we can contribute no further
@@ -405,7 +411,7 @@ make_decision(AllPartitions) ->
 partition_value(Partition) ->
     Connections = [Res || Node <- Partition,
                           Res <- [rpc:call(Node, rabbit_networking,
-                                           connections_local, [])],
+                                           local_connections, [])],
                           is_list(Res)],
     {length(lists:append(Connections)), length(Partition)}.
 

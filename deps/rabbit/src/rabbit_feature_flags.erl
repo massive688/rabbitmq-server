@@ -2,11 +2,11 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2018-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2024 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 %% @author The RabbitMQ team
-%% @copyright 2018-2023 VMware, Inc. or its affiliates.
+%% @copyright 2007-2024 Broadcom. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 %% @doc
 %% This module offers a framework to declare capabilities a RabbitMQ node
@@ -122,6 +122,7 @@
          read_enabled_feature_flags_list/0,
          copy_feature_states_after_reset/1,
          uses_callbacks/1,
+         reset/0,
          reset_registry/0]).
 
 -ifdef(TEST).
@@ -227,7 +228,7 @@
 %% It is called when a feature flag is being enabled. The function is
 %% responsible for this feature-flag-specific verification and data
 %% conversion. It returns `ok' if RabbitMQ can mark the feature flag as
-%% enabled an continue with the next one, if any. `{error, Reason}' and
+%% enabled and continue with the next one, if any. `{error, Reason}' and
 %% exceptions are an error and the feature flag will remain disabled.
 %%
 %% The migration function is called on all nodes which fulfill the following
@@ -295,7 +296,8 @@
 
 -type inventory() :: #{applications := [atom()],
                        feature_flags := feature_flags(),
-                       states := feature_states()}.
+                       states := feature_states(),
+                       written_to_disk := boolean()}.
 
 -type cluster_inventory() :: #{feature_flags := feature_flags(),
                                applications_per_node :=
@@ -698,10 +700,9 @@ info(Options) when is_map(Options) ->
 
 get_state(FeatureName) when is_atom(FeatureName) ->
     IsEnabled = is_enabled(FeatureName),
-    IsSupported = is_supported(FeatureName),
     case IsEnabled of
         true  -> enabled;
-        false -> case IsSupported of
+        false -> case is_supported(FeatureName) of
                      true  -> disabled;
                      false -> unavailable
                  end
@@ -771,11 +772,17 @@ init() ->
     ok.
 
 -define(PT_TESTSUITE_ATTRS, {?MODULE, testsuite_feature_flags_attrs}).
+%% We must lock while making updates to the above persistent_term in order to
+%% make the updates atomic. Otherwise if two processes attempt to inject
+%% different flags at the same time, they might race and a flag could be
+%% mistakenly discarded.
+-define(LOCK_TESTSUITE_ATTRS, {?PT_TESTSUITE_ATTRS, self()}).
 
 inject_test_feature_flags(FeatureFlags) ->
     inject_test_feature_flags(FeatureFlags, true).
 
 inject_test_feature_flags(FeatureFlags, InitReg) ->
+    true = global:set_lock(?LOCK_TESTSUITE_ATTRS, [node()]),
     ExistingAppAttrs = module_attributes_from_testsuite(),
     FeatureFlagsPerApp0 = lists:foldl(
                             fun({Origin, Origin, FFlags}, Acc) ->
@@ -809,13 +816,17 @@ inject_test_feature_flags(FeatureFlags, InitReg) ->
       [FeatureFlags, AttributesFromTestsuite],
       #{domain => ?RMQLOG_DOMAIN_FEAT_FLAGS}),
     ok = persistent_term:put(?PT_TESTSUITE_ATTRS, AttributesFromTestsuite),
+    true = global:del_lock(?LOCK_TESTSUITE_ATTRS, [node()]),
     case InitReg of
         true  -> rabbit_ff_registry_factory:initialize_registry();
         false -> ok
     end.
 
 clear_injected_test_feature_flags() ->
-    _ = persistent_term:erase(?PT_TESTSUITE_ATTRS),
+    _ = global:trans(
+          ?LOCK_TESTSUITE_ATTRS,
+          fun() -> persistent_term:erase(?PT_TESTSUITE_ATTRS) end,
+          [node()]),
     ok.
 
 module_attributes_from_testsuite() ->
@@ -830,7 +841,7 @@ query_supported_feature_flags() ->
     ?LOG_DEBUG(
       "Feature flags: query feature flags in loaded applications",
       #{domain => ?RMQLOG_DOMAIN_FEAT_FLAGS}),
-    T0 = erlang:timestamp(),
+    T0 = erlang:monotonic_time(),
     %% We need to know the list of applications we scanned for feature flags.
     %% We can't derive that list of the returned feature flags because an
     %% application might be loaded/present and not have a specific feature
@@ -842,11 +853,11 @@ query_supported_feature_flags() ->
                     rabbit_deprecated_feature, ScannedApps),
     AttrsFromTestsuite = module_attributes_from_testsuite(),
     TestsuiteProviders = [App || {App, _, _} <- AttrsFromTestsuite],
-    T1 = erlang:timestamp(),
+    T1 = erlang:monotonic_time(),
     ?LOG_DEBUG(
       "Feature flags: time to find supported feature flags and deprecated "
       "features: ~tp us",
-      [timer:now_diff(T1, T0)],
+      [erlang:convert_time_unit(T1 - T0, native, microsecond)],
       #{domain => ?RMQLOG_DOMAIN_FEAT_FLAGS}),
     AllAttributes = AttrsPerAppA ++ AttrsPerAppB ++ AttrsFromTestsuite,
     AllApps = lists:usort(ScannedApps ++ TestsuiteProviders),
@@ -1129,7 +1140,7 @@ do_write_enabled_feature_flags_list(EnabledFeatureNames) ->
     EnabledFeatureNames1 = lists:sort(EnabledFeatureNames),
 
     File = enabled_feature_flags_list_file(),
-    Content = io_lib:format("~tp.~n", [EnabledFeatureNames1]),
+    Content = io_lib:format("~1tp.~n", [EnabledFeatureNames1]),
     %% TODO: If we fail to write the the file, we should spawn a process
     %% to retry the operation.
     case file:write_file(File, Content) of
@@ -1142,6 +1153,18 @@ do_write_enabled_feature_flags_list(EnabledFeatureNames) ->
               [File, file:format_error(Reason)],
               #{domain => ?RMQLOG_DOMAIN_FEAT_FLAGS}),
             Error
+    end.
+
+-spec delete_enabled_feature_flags_list_file() -> Ret when
+      Ret :: ok | {error, file:posix() | badarg}.
+%% @private
+
+delete_enabled_feature_flags_list_file() ->
+    File = enabled_feature_flags_list_file(),
+    case file:delete(File) of
+        ok              -> ok;
+        {error, enoent} -> ok;
+        Error           -> Error
     end.
 
 -spec enabled_feature_flags_list_file() -> file:filename().
@@ -1321,6 +1344,14 @@ sync_feature_flags_with_cluster(Nodes, _NodeIsVirgin) ->
 
 refresh_feature_flags_after_app_load() ->
     rabbit_ff_controller:refresh_after_app_load().
+
+-spec reset() -> ok.
+%% @doc Resets the feature flags registry and recorded states on disk.
+
+reset() ->
+    ok = reset_registry(),
+    ok = delete_enabled_feature_flags_list_file(),
+    ok.
 
 -spec reset_registry() -> ok.
 %% @doc Resets the feature flags registry.

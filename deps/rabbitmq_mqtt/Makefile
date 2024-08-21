@@ -4,10 +4,7 @@ PROJECT_MOD = rabbit_mqtt
 
 define PROJECT_ENV
 [
-	    {default_user, <<"guest">>},
-	    {default_pass, <<"guest">>},
 	    {ssl_cert_login,false},
-	    %% To satisfy an unfortunate expectation from popular MQTT clients.
 	    {allow_anonymous, true},
 	    {vhost, <<"/">>},
 	    {exchange, <<"amq.topic">>},
@@ -44,11 +41,13 @@ BUILD_WITHOUT_QUIC=1
 export BUILD_WITHOUT_QUIC
 
 LOCAL_DEPS = ssl
-DEPS = ranch rabbit_common rabbit ra
-TEST_DEPS = emqtt ct_helper rabbitmq_ct_helpers rabbitmq_ct_client_helpers rabbitmq_management rabbitmq_web_mqtt amqp_client rabbitmq_consistent_hash_exchange rabbitmq_amqp1_0 amqp10_client rabbitmq_stomp rabbitmq_stream
+DEPS = ranch rabbit_common rabbit amqp10_common
+TEST_DEPS = emqtt ct_helper rabbitmq_ct_helpers rabbitmq_ct_client_helpers rabbitmq_management rabbitmq_web_mqtt amqp_client rabbitmq_consistent_hash_exchange rabbitmq_amqp_client rabbitmq_stomp rabbitmq_stream
+
+PLT_APPS += rabbitmqctl elixir
 
 dep_ct_helper = git https://github.com/extend/ct_helper.git master
-dep_emqtt = git https://github.com/rabbitmq/emqtt.git master
+dep_emqtt = git https://github.com/emqx/emqtt.git 1.11.0
 
 DEP_EARLY_PLUGINS = rabbit_common/mk/rabbitmq-early-plugin.mk
 DEP_PLUGINS = rabbit_common/mk/rabbitmq-plugin.mk

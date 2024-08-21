@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2024 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_basic).
@@ -235,18 +235,23 @@ is_message_persistent(#content{properties = #'P_basic'{
 
 %% Extract CC routes from headers
 
--spec header_routes(undefined | rabbit_framing:amqp_table()) -> [string()].
+-spec header_routes(undefined | rabbit_framing:amqp_table()) -> [string()] | {error, Reason :: any()}.
 
 header_routes(undefined) ->
     [];
 header_routes(HeadersTable) ->
-    lists:append(
-      [case rabbit_misc:table_lookup(HeadersTable, HeaderKey) of
-           {array, Routes} -> [Route || {longstr, Route} <- Routes];
-           undefined       -> [];
-           {Type, _Val}    -> throw({error, {unacceptable_type_in_header,
-                                             binary_to_list(HeaderKey), Type}})
-       end || HeaderKey <- ?ROUTING_HEADERS]).
+    try
+        lists:append(
+          [case rabbit_misc:table_lookup(HeadersTable, HeaderKey) of
+               {array, Routes} -> [Route || {longstr, Route} <- Routes];
+               undefined       -> [];
+               {Type, _Val}    -> throw({error, {unacceptable_type_in_header,
+                                                 binary_to_list(HeaderKey), Type}})
+           end || HeaderKey <- ?ROUTING_HEADERS])
+    catch
+        {error, _Reason} = Error ->
+            Error
+    end.
 
 -spec parse_expiration
         (rabbit_framing:amqp_property_record()) ->
@@ -281,7 +286,7 @@ msg_size(Content) ->
     rabbit_writer:msg_size(Content).
 
 add_header(Name, Type, Value, #basic_message{content = Content0} = Msg) ->
-    Content = rabbit_basic:map_headers(
+    Content = map_headers(
                 fun(undefined) ->
                         rabbit_misc:set_table_value([], Name, Type, Value);
                    (Headers) ->
@@ -318,15 +323,19 @@ binary_prefix_64(Bin, Len) ->
     binary:part(Bin, 0, min(byte_size(Bin), Len)).
 
 make_message(XName, RoutingKey, #content{properties = Props} = DecodedContent, Guid) ->
-    try
-        {ok, #basic_message{
-           exchange_name = XName,
-           content       = strip_header(DecodedContent, ?DELETED_HEADER),
-           id            = Guid,
-           is_persistent = is_message_persistent(DecodedContent),
-           routing_keys  = [RoutingKey |
-                            header_routes(Props#'P_basic'.headers)]}}
-    catch
-        {error, _Reason} = Error -> Error
+    case header_routes(Props#'P_basic'.headers) of
+        {error, _} = Error ->
+            Error;
+        Routes ->
+            try
+                {ok, #basic_message{
+                        exchange_name = XName,
+                        content       = strip_header(DecodedContent, ?DELETED_HEADER),
+                        id            = Guid,
+                        is_persistent = is_message_persistent(DecodedContent),
+                        routing_keys  = [RoutingKey | Routes]}}
+            catch
+                {error, _Reason} = Error -> Error
+            end
     end.
 

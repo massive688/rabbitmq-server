@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2024 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 -module(rabbit_mgmt_wm_quorum_queue_replicas_add_member).
 
@@ -11,8 +11,6 @@
 -export([variances/2]).
 
 -include_lib("rabbitmq_management_agent/include/rabbit_mgmt_records.hrl").
--include_lib("rabbit_common/include/rabbit.hrl").
-
 -define(TIMEOUT, 30_000).
 
 init(Req, _State) ->
@@ -38,11 +36,17 @@ accept_content(ReqData, Context) ->
   QName = rabbit_mgmt_util:id(queue, ReqData),
   Res = rabbit_mgmt_util:with_decode(
     [node], ReqData, Context,
-    fun([NewReplicaNode], _Body, _ReqData) ->
+    fun([NewReplicaNode], Body, _ReqData) ->
+      Membership = maps:get(<<"membership">>, Body, promotable),
       rabbit_amqqueue:with(
         rabbit_misc:r(VHost, queue, QName),
         fun(_Q) ->
-          rabbit_quorum_queue:add_member(VHost, QName, rabbit_data_coercion:to_atom(NewReplicaNode), ?TIMEOUT)
+                rabbit_quorum_queue:add_member(
+                  VHost,
+                  QName,
+                  rabbit_data_coercion:to_atom(NewReplicaNode),
+                  rabbit_data_coercion:to_atom(Membership),
+                  ?TIMEOUT)
         end)
     end),
   case Res of

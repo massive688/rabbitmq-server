@@ -1,6 +1,3 @@
-[![OTP v22.3](https://img.shields.io/github/workflow/status/rabbitmq/rabbitmq-server/Test%20-%20Erlang%2022.3/main?label=Erlang%2022.3)](https://github.com/rabbitmq/rabbitmq-server/actions?query=workflow%3A%22Test+-+Erlang+22.3%22+branch%3A%22main%22)
-[![OTP v23](https://img.shields.io/github/workflow/status/rabbitmq/rabbitmq-server/Test%20-%20Erlang%2023.1/main?label=Erlang%2023.1)](https://github.com/rabbitmq/rabbitmq-server/actions?query=workflow%3A%22Test+-+Erlang+23.1%22+branch%3Amain)
-
 # RabbitMQ Server
 
 [RabbitMQ](https://rabbitmq.com) is a [feature rich](https://rabbitmq.com/documentation.html), multi-protocol messaging broker. It supports:
@@ -62,4 +59,4 @@ RabbitMQ server is [licensed under the MPL 2.0](LICENSE-MPL-RabbitMQ).
 
 ## Copyright
 
-(c) 2007-2020 VMware, Inc. or its affiliates.
+(c) 2007-2024 Broadcom. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.

@@ -2,12 +2,11 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2020-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2024 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(per_user_connection_channel_limit_partitions_SUITE).
 
--include_lib("common_test/include/ct.hrl").
 -include_lib("amqp_client/include/amqp_client.hrl").
 -include_lib("eunit/include/eunit.hrl").
 -include_lib("rabbitmq_ct_helpers/include/rabbit_assert.hrl").
@@ -124,8 +123,15 @@ cluster_full_partition_with_autoheal(Config) ->
     ?awaitMatch(All, list_running(Config, B), 60000, 3000),
     ?awaitMatch(All, list_running(Config, C), 60000, 3000),
 
-    %% during autoheal B's connections were dropped
-    ?awaitMatch({4, 10},
+    %% During autoheal B's connections were dropped. Autoheal is not running
+    %% when Khepri is used.
+    KhepriEnabled = rabbit_ct_broker_helpers:is_feature_flag_enabled(
+                      Config, khepri_db),
+    ExpectedCount = case KhepriEnabled of
+                        true  -> {6, 15};
+                        false -> {4, 10}
+                    end,
+    ?awaitMatch(ExpectedCount,
                 {count_connections_in(Config, Username),
                  count_channels_in(Config, Username)},
                 60000, 3000),

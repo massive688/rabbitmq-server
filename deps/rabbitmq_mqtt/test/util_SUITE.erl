@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2024 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 
 -module(util_SUITE).
 -compile([export_all, nowarn_export_all]).
@@ -18,8 +18,6 @@ groups() ->
     [
      {tests, [parallel], [
                           coerce_vhost,
-                          coerce_default_user,
-                          coerce_default_pass,
                           mqtt_amqp_topic_translation
                          ]
      }
@@ -35,12 +33,6 @@ end_per_suite(Config) ->
 
 coerce_vhost(_) ->
     ?assertEqual(<<"/">>, rabbit_mqtt_util:env(vhost)).
-
-coerce_default_user(_) ->
-    ?assertEqual(<<"guest_user">>, rabbit_mqtt_util:env(default_user)).
-
-coerce_default_pass(_) ->
-    ?assertEqual(<<"guest_pass">>, rabbit_mqtt_util:env(default_pass)).
 
 mqtt_amqp_topic_translation(_) ->
     ok = application:set_env(rabbitmq_mqtt, sparkplug, true),

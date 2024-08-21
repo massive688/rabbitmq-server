@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2024 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 -module(amqp10_client_frame_reader).
 
@@ -262,11 +262,17 @@ handle_input(expecting_frame_body, Data,
         {<<_:BodyLength/binary, Rest/binary>>, 0} ->
             % heartbeat
             handle_input(expecting_frame_header, Rest, State);
-        {<<FrameBody:BodyLength/binary, Rest/binary>>, _} ->
+        {<<Body:BodyLength/binary, Rest/binary>>, _} ->
             State1 = State#state{frame_state = undefined},
-            {PerfDesc, Payload} = amqp10_binary_parser:parse(FrameBody),
-            Perf = amqp10_framing:decode(PerfDesc),
-            State2 = route_frame(Channel, FrameType, {Perf, Payload}, State1),
+            BytesBody = size(Body),
+            {DescribedPerformative, BytesParsed} = amqp10_binary_parser:parse(Body),
+            Performative = amqp10_framing:decode(DescribedPerformative),
+            Payload = if BytesParsed < BytesBody ->
+                             binary_part(Body, BytesParsed, BytesBody - BytesParsed);
+                         BytesParsed =:= BytesBody ->
+                             no_payload
+                      end,
+            State2 = route_frame(Channel, FrameType, {Performative, Payload}, State1),
             handle_input(expecting_frame_header, Rest, State2);
         _ ->
             {ok, expecting_frame_body, Data, State}
@@ -280,22 +286,26 @@ handle_input(StateName, Data, State) ->
 defer_heartbeat_timer(State =
                       #state{heartbeat_timer_ref = TRef,
                              connection_config = #{idle_time_out := T}})
-  when is_number(T) andalso T > 0 ->
+  when is_integer(T) andalso T > 0 ->
     _ = case TRef of
-            undefined -> ok;
-            _ -> _ = erlang:cancel_timer(TRef)
+            undefined ->
+                ok;
+            _ ->
+                erlang:cancel_timer(TRef, [{async, true},
+                                           {info, false}])
         end,
     NewTRef = erlang:send_after(T * 2, self(), heartbeat),
     State#state{heartbeat_timer_ref = NewTRef};
-defer_heartbeat_timer(State) -> State.
+defer_heartbeat_timer(State) ->
+    State.
 
 route_frame(Channel, FrameType, {Performative, Payload} = Frame, State0) ->
     {DestinationPid, State} = find_destination(Channel, FrameType, Performative,
                                                State0),
     ?DBG("FRAME -> ~tp ~tp~n ~tp", [Channel, DestinationPid, Performative]),
     case Payload of
-        <<>> -> ok = gen_statem:cast(DestinationPid, Performative);
-        _ -> ok = gen_statem:cast(DestinationPid, Frame)
+        no_payload -> gen_statem:cast(DestinationPid, Performative);
+        _ -> gen_statem:cast(DestinationPid, Frame)
     end,
     State.
 

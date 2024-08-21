@@ -2,15 +2,13 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2011-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2024 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(routing_SUITE).
 
 -include_lib("eunit/include/eunit.hrl").
 -include_lib("amqp_client/include/amqp_client.hrl").
--include_lib("common_test/include/ct.hrl").
-
 -compile([nowarn_export_all, export_all]).
 -compile(export_all).
 
@@ -19,7 +17,8 @@
 
 all() ->
     [
-     {group, mnesia_store}
+     {group, mnesia_store},
+     {group, khepri_store}
     ].
 
 suite() ->
@@ -27,7 +26,8 @@ suite() ->
 
 groups() ->
     [
-     {mnesia_store, [], all_tests()}
+     {mnesia_store, [], all_tests()},
+     {khepri_store, [], all_tests()}
     ].
 
 all_tests() ->
@@ -46,10 +46,17 @@ init_per_suite(Config) ->
 end_per_suite(Config) ->
     rabbit_ct_helpers:run_teardown_steps(Config).
 
-init_per_group(mnesia_store = Group, Config) ->
+init_per_group(mnesia_store = Group, Config0) ->
+    Config = rabbit_ct_helpers:set_config(Config0, [{metadata_store, mnesia}]),
+    init_per_group_common(Group, Config, 1);
+init_per_group(khepri_store = Group, Config0) ->
+    Config = rabbit_ct_helpers:set_config(Config0, [{metadata_store, khepri}]),
+    init_per_group_common(Group, Config, 1).
+
+init_per_group_common(Group, Config, Size) ->
     Config1 = rabbit_ct_helpers:set_config(Config, [
         {rmq_nodename_suffix, Group},
-        {rmq_nodes_count, 1}
+        {rmq_nodes_count, Size}
       ]),
     rabbit_ct_helpers:run_steps(Config1,
       rabbit_ct_broker_helpers:setup_steps() ++
@@ -77,9 +84,9 @@ topic(Config) ->
 
 topic1(_Config) ->
     XName = rabbit_misc:r(?VHOST, exchange, <<"topic_matching-exchange">>),
-    X = rabbit_exchange:declare(
-          XName, topic, _Durable = true, _AutoDelete = false,
-          _Internal = false, _Args = [], ?USER),
+    {ok, X} = rabbit_exchange:declare(
+                XName, topic, _Durable = true, _AutoDelete = false,
+                _Internal = false, _Args = [], ?USER),
 
     %% add some bindings
     Bindings = [#binding{source = XName,
@@ -196,9 +203,9 @@ test_topic_expect_match(X, List) ->
               BinKey = list_to_binary(Key),
               Message = rabbit_basic:message(X#exchange.name, BinKey,
                                              #'P_basic'{}, <<>>),
-              Msg = mc_amqpl:message(X#exchange.name,
-                                     BinKey,
-                                     Message#basic_message.content),
+              {ok, Msg} = mc_amqpl:message(X#exchange.name,
+                                           BinKey,
+                                           Message#basic_message.content),
               Res = rabbit_exchange_type_topic:route(X, Msg),
               ExpectedRes = [rabbit_misc:r(?VHOST, queue, list_to_binary(Q)) ||
                              Q <- Expected],

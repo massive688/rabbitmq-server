@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2018-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2024 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 
 -module(rabbit_message_interceptor_SUITE).
 
@@ -66,10 +66,10 @@ headers_no_overwrite(Config) ->
 headers(Overwrite, Config) ->
     Server = atom_to_binary(rabbit_ct_broker_helpers:get_node_config(Config, 0, nodename)),
     Payload = QName = atom_to_binary(?FUNCTION_NAME),
-    NowSecs = os:system_time(second),
-    NowMs = os:system_time(millisecond),
     Ch = rabbit_ct_client_helpers:open_channel(Config),
     #'queue.declare_ok'{} = amqp_channel:call(Ch, #'queue.declare'{queue = QName}),
+    NowSecs = os:system_time(second),
+    NowMs = os:system_time(millisecond),
     amqp_channel:call(Ch, #'basic.publish'{routing_key = QName},
                       #amqp_msg{payload = Payload}),
     AssertHeaders =

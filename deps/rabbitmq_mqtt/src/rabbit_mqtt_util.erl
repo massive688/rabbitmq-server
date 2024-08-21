@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2024 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_mqtt_util).
@@ -141,10 +141,10 @@ env(Key) ->
         undefined -> undefined
     end.
 
-coerce_env_value(default_pass, Val) -> rabbit_data_coercion:to_binary(Val);
-coerce_env_value(default_user, Val) -> rabbit_data_coercion:to_binary(Val);
-coerce_env_value(vhost, Val)        -> rabbit_data_coercion:to_binary(Val);
-coerce_env_value(_, Val)            -> Val.
+coerce_env_value(vhost, Val) ->
+    rabbit_data_coercion:to_binary(Val);
+coerce_env_value(_, Val) ->
+    Val.
 
 -spec table_lookup(rabbit_framing:amqp_table() | undefined,  binary()) ->
     tuple() | undefined.

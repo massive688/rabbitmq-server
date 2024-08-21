@@ -107,20 +107,14 @@
                   <span class="argument-link" field="definition" key="expires" type="number">Auto expire</span> </br>
                   <span class="argument-link" field="definition" key="dead-letter-exchange" type="string">Dead letter exchange</span> |
                   <span class="argument-link" field="definition" key="dead-letter-routing-key" type="string">Dead letter routing key</span><br/>
-                  <span class="argument-link" field="definition" key="message-ttl" type="number">Message TTL</span><span class="help" id="queue-message-ttl"></span></br>
-                  <span class="argument-link" field="definition" key="consumer-timeout" type="number">Consumer Timeout</span><span class="help" id="queue-consumer-timeout"></span></br>
+                  <span class="argument-link" field="definition" key="message-ttl" type="number">Message TTL</span><span class="help" id="queue-message-ttl"></span> |
+                  <span class="argument-link" field="definition" key="consumer-timeout" type="number">Consumer Timeout</span><span class="help" id="queue-consumer-timeout"></span> |
+                  <span class="argument-link" field="definition" key="queue-leader-locator" type="string">Leader locator</span><span class="help" id="queue-leader-locator"></span></br>
                 </td>
               <tr>
                 <td>Queues [Classic]</td>
                 <td>
-                  <span class="argument-link" field="definition" key="ha-mode" type="string">HA mode</span> <span class="help" id="policy-ha-mode"></span> |
-                  <span class="argument-link" field="definition" key="ha-params" type="number">HA params</span> <span class="help" id="policy-ha-params"></span> |
-                  <span class="argument-link" field="definition" key="ha-sync-mode" type="string">HA sync mode</span> <span class="help" id="policy-ha-sync-mode"></span> </br>
-                  <span class="argument-link" field="definition" key="ha-promote-on-shutdown" type="string" value="">HA mirror promotion on shutdown</span> <span class="help" id="policy-ha-promote-on-shutdown"></span> |
-                  <span class="argument-link" field="definition" key="ha-promote-on-failure" type="string" value="">HA mirror promotion on failure</span> <span class="help" id="policy-ha-promote-on-failure"></span>
-                  </br>
                   <span class="argument-link" field="definition" key="queue-version" type="number">Version</span> <span class="help" id="queue-version"></span> |
-                  <span class="argument-link" field="definition" key="queue-master-locator" type="string">Master locator</span></br>
                 </td>
               </tr>
               <tr>
@@ -130,8 +124,6 @@
                   <span class="help" id="delivery-limit"></span> |
                   <span class="argument-link" field="definition" key="dead-letter-strategy" type="string">Dead letter strategy</span>
                   <span class="help" id="queue-dead-letter-strategy"></span> |
-                  <span class="argument-link" field="definition" key="queue-leader-locator" type="string">Leader locator</span>
-                  <span class="help" id="queue-leader-locator"></span>
                 </td>
               </tr>
               <tr>
@@ -139,12 +131,8 @@
                 <td>
                   <span class="argument-link" field="definition" key="max-age" type="string">Max age</span>
                   <span class="help" id="queue-max-age"></span> |
-                  <span class="argument-link" field="definition" key="stream-max-segment-size-bytes" type="number">Max segment size in bytes</span>
-                  <span class="help" id="queue-stream-max-segment-size-bytes"></span> |
                   <span class="argument-link" field="definition" key="stream-filter-size-bytes" type="number">Filter size in bytes. Valid range: 16-255</span>
                   <span class="help" id="queue-stream-filter-size-bytes"></span> |
-                  <span class="argument-link" field="definition" key="queue-leader-locator" type="string">Leader locator</span>
-                  <span class="help" id="queue-leader-locator"></span>
                 </td>
               </tr>
               <tr>
@@ -280,30 +268,37 @@
             <div class="multifield" id="definitionop"></div>
             <table class="argument-links">
               <tr>
-                <td>Queues [All types]</td>
-                <td>
-                  <span class="argument-link" field="definitionop" key="max-length" type="number">Max length</span> |
-                  <span class="argument-link" field="definitionop" key="max-length-bytes" type="number">Max length bytes</span> |
-                  <span class="argument-link" field="definitionop" key="overflow" type="string">Overflow behaviour</span>
-                  <span class="help" id="queue-overflow"></span></br>
-                  <span class="argument-link" field="definitionop" key="message-ttl" type="number">Message TTL</span>
-                  <span class="help" id="queue-message-ttl"></span>
-                </td>
-              </tr>
-              <tr>
                 <td>Queues [Classic]</td>
                 <td>
-                  <span class="argument-link" field="definitionop" key="expires" type="number">Auto expire</span>
-                  <span class="argument-link" field="definitionop" key="ha-mode" type="string">HA mode</span> <span class="help" id="policy-ha-mode"></span> |
-                  <span class="argument-link" field="definitionop" key="ha-params" type="number">HA params</span> <span class="help" id="policy-ha-params"></span> |
-                  <span class="argument-link" field="definitionop" key="ha-sync-mode" type="string">HA sync mode</span> <span class="help" id="policy-ha-sync-mode"></span> </br>
+                  <span class="argument-link" field="definitionop" key="expires" type="number">Auto expire</span> |
+                  <span class="argument-link" field="definitionop" key="max-length" type="number">Max length</span> |
+                  <span class="argument-link" field="definitionop" key="max-length-bytes" type="number">Max length bytes</span> |
+                  <span class="argument-link" field="definitionop" key="message-ttl" type="number">Message TTL</span> |
+                  <span class="help" id="queue-message-ttl"></span> |
+                  <span class="argument-link" field="definitionop" key="queue-version" type="number">Version</span> <span class="help" id="queue-version"></span> </br>
+                  <span class="argument-link" field="definitionop" key="overflow" type="string">Length limit overflow behaviour</span> <span class="help" id="queue-overflow"></span> </br>
                 </td>
               </tr>
               <tr>
                 <td>Queues [Quorum]</td>
                 <td>
-                  <span class="argument-link" field="definitionop" key="delivery-limit" type="string">Delivery limit</span>
-                  <span class="help" id="delivery-limit"></span>
+                  <span class="argument-link" field="definitionop" key="delivery-limit" type="number">Delivery limit</span>
+                  <span class="help" id="delivery-limit"></span> |
+                  <span class="argument-link" field="definitionop" key="expires" type="number">Auto expire</span> |
+                  <span class="argument-link" field="definitionop" key="max-in-memory-bytes" type="number">Max in-memory bytes</span> |
+                  <span class="argument-link" field="definitionop" key="max-in-memory-length" type="number">Max in-memory length</span> <br>
+                  <span class="argument-link" field="definitionop" key="max-length" type="number">Max length</span> |
+                  <span class="argument-link" field="definitionop" key="max-length-bytes" type="number">Max length bytes</span> |
+                  <span class="argument-link" field="definitionop" key="message-ttl" type="number">Message TTL</span>
+                  <span class="help" id="queue-message-ttl"></span> |
+                  <span class="argument-link" field="definitionop" key="target-group-size" type="number">Target group size</span> |
+                  <span class="argument-link" field="definitionop" key="overflow" type="string">Length limit overflow behaviour</span> <span class="help" id="queue-overflow"></span> </br>
+                </td>
+              </tr>
+              <tr>
+                <td>Queues [Streams]</td>
+                <td>
+                  <span class="argument-link" field="definitionop" key="max-length-bytes" type="number">Max length bytes</span>
                 </td>
               </tr>
             </table>

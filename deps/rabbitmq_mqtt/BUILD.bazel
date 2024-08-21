@@ -4,7 +4,6 @@ load("@rules_erlang//:dialyze.bzl", "dialyze", "plt")
 load(
     "//:rabbitmq.bzl",
     "BROKER_VERSION_REQUIREMENTS_ANY",
-    "ENABLE_FEATURE_MAYBE_EXPR",
     "RABBITMQ_DIALYZER_OPTS",
     "assert_suites",
     "broker_for_integration_suites",
@@ -27,10 +26,7 @@ APP_DESCRIPTION = "RabbitMQ MQTT Adapter"
 APP_MODULE = "rabbit_mqtt"
 
 APP_ENV = """[
-	    {default_user, <<"guest">>},
-	    {default_pass, <<"guest">>},
 	    {ssl_cert_login,false},
-	    %% To satisfy an unfortunate expectation from popular MQTT clients.
 	    {allow_anonymous, true},
 	    {vhost, <<"/">>},
 	    {exchange, <<"amq.topic">>},
@@ -85,7 +81,6 @@ rabbitmq_app(
         "//deps/amqp10_common:erlang_app",
         "//deps/rabbit:erlang_app",
         "//deps/rabbit_common:erlang_app",
-        "@ra//:erlang_app",
         "@ranch//:erlang_app",
     ],
 )
@@ -102,7 +97,7 @@ plt(
     name = "deps_plt",
     for_target = ":erlang_app",
     ignore_warnings = True,
-    libs = ["//deps/rabbitmq_cli:elixir"],  # keep
+    libs = ["@rules_elixir//elixir"],  # keep
     plt = "//:base_plt",
     deps = ["//deps/rabbitmq_cli:erlang_app"],  # keep
 )
@@ -121,7 +116,6 @@ eunit(
         ":test_event_recorder_beam",
         ":test_util_beam",
     ],
-    erl_extra_args = [ENABLE_FEATURE_MAYBE_EXPR],
     target = ":test_erlang_app",
 )
 
@@ -130,7 +124,6 @@ broker_for_integration_suites(
         "//deps/rabbitmq_management:erlang_app",
         "//deps/rabbitmq_web_mqtt:erlang_app",
         "//deps/rabbitmq_consistent_hash_exchange:erlang_app",
-        "//deps/rabbitmq_amqp1_0:erlang_app",
         "//deps/rabbitmq_stomp:erlang_app",
         "//deps/rabbitmq_stream:erlang_app",
     ],
@@ -156,7 +149,7 @@ rabbitmq_integration_suite(
         ":test_util_beam",
     ],
     flaky = True,
-    shard_count = 6,
+    shard_count = 4,
     sharding_method = "case",
     runtime_deps = [
         "@emqtt//:erlang_app",
@@ -182,16 +175,6 @@ rabbitmq_integration_suite(
 )
 
 rabbitmq_integration_suite(
-    name = "ff_SUITE",
-    additional_beam = [
-        ":test_util_beam",
-    ],
-    runtime_deps = [
-        "@emqtt//:erlang_app",
-    ],
-)
-
-rabbitmq_integration_suite(
     name = "java_SUITE",
     additional_beam = [
         ":test_util_beam",
@@ -201,13 +184,11 @@ rabbitmq_integration_suite(
 )
 
 rabbitmq_suite(
-    name = "mqtt_machine_SUITE",
-    size = "small",
-)
-
-rabbitmq_suite(
     name = "processor_SUITE",
     size = "small",
+    runtime_deps = [
+        "@meck//:erlang_app",
+    ],
     deps = [
         "//deps/amqp_client:erlang_app",
         "//deps/rabbit_common:erlang_app",
@@ -250,7 +231,7 @@ rabbitmq_integration_suite(
         ":test_util_beam",
         ":test_event_recorder_beam",
     ],
-    shard_count = 12,
+    shard_count = 10,
     runtime_deps = [
         "//deps/rabbitmq_management_agent:erlang_app",
         "@emqtt//:erlang_app",
@@ -278,8 +259,9 @@ rabbitmq_integration_suite(
     additional_beam = [
         ":test_util_beam",
     ],
+    shard_count = 2,
     runtime_deps = [
-        "//deps/amqp10_client:erlang_app",
+        "//deps/rabbitmq_amqp_client:erlang_app",
         "//deps/rabbitmq_stomp:erlang_app",
         "//deps/rabbitmq_stream_common:erlang_app",
         "@emqtt//:erlang_app",
@@ -314,6 +296,7 @@ rabbitmq_suite(
     size = "small",
     deps = [
         "//deps/amqp10_common:erlang_app",
+        "//deps/rabbit:erlang_app",
     ],
 )
 

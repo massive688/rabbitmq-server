@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2016-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2024 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_ct_helpers).
@@ -66,14 +66,8 @@
 
 log_environment() ->
     Vars = lists:sort(fun(A, B) -> A =< B end, os:getenv()),
-    case file:native_name_encoding() of
-        latin1 ->
-            ct:pal(?LOW_IMPORTANCE, "Environment variables:~n~ts",
-                   [[io_lib:format("  ~ts~n", [V]) || V <- Vars]]);
-        utf8 ->
-            ct:pal(?LOW_IMPORTANCE, "Environment variables:~n~ts",
-                   [[io_lib:format("  ~ts~n", [V]) || V <- Vars]])
-    end.
+    ct:pal(?LOW_IMPORTANCE, "Environment variables:~n~ts",
+           [[io_lib:format("  ~ts~n", [V]) || V <- Vars]]).
 
 run_setup_steps(Config) ->
     run_setup_steps(Config, []).
@@ -423,8 +417,7 @@ ensure_rabbitmq_run_secondary_cmd(Config) ->
     end.
 
 ensure_erl_call_cmd(Config) ->
-    ErlCallDir = code:lib_dir(erl_interface, bin),
-    ErlCall = filename:join(ErlCallDir, "erl_call"),
+    ErlCall = filename:join(code:lib_dir(erl_interface), "bin/erl_call"),
     Cmd = [ErlCall],
     case exec(Cmd, [{match_stdout, "Usage: "}]) of
         {ok, _} -> set_config(Config, {erl_call_cmd, ErlCall});
@@ -618,7 +611,10 @@ ensure_ssl_certs(Config) ->
                       {verify, Verify},
                       {fail_if_no_peer_cert, FailIfNoPeerCert}
                     ]}]}),
-            set_config(Config1, {rmq_certsdir, CertsDir});
+            set_config(
+              Config1,
+              [{rmq_certsdir, CertsDir},
+               {rmq_certspwd, CertsPwd}]);
         _ ->
             {skip, "Failed to create SSL certificates"}
     end.
@@ -883,7 +879,10 @@ exec([Cmd | Args], Options) when is_list(Cmd) orelse is_binary(Cmd) ->
             Env1 = [
               begin
                   Key1 = format_arg(Key),
-                  Value1 = format_arg(Value),
+                  Value1 = case Value of
+                               false -> false;
+                               _     -> format_arg(Value)
+                           end,
                   Value2 = case is_binary(Value1) of
                                true  -> binary_to_list(Value1);
                                false -> Value1
@@ -897,8 +896,10 @@ exec([Cmd | Args], Options) when is_list(Cmd) orelse is_binary(Cmd) ->
                | proplists:delete(env, PortOptions1)],
               Log ++ "~n~nEnvironment variables:~n" ++
               string:join(
-                [rabbit_misc:format("  ~ts=~ts", [K, string:replace(V, "~", "~~", all)])
-                 || {K, V} <- Env1],
+                [rabbit_misc:format(
+                   "  ~ts=~ts",
+                   [K, string:replace(V, "~", "~~", all)])
+                 || {K, V} <- Env1, is_list(V) ],
                 "~n")
             }
     end,

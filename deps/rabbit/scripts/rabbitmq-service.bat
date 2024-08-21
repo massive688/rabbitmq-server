@@ -3,7 +3,7 @@ REM  This Source Code Form is subject to the terms of the Mozilla Public
 REM  License, v. 2.0. If a copy of the MPL was not distributed with this
 REM  file, You can obtain one at https://mozilla.org/MPL/2.0/.
 REM
-REM  Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
+REM  Copyright (c) 2007-2024 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 REM
 
 setlocal
@@ -201,7 +201,6 @@ set ERLANG_SERVICE_ARGUMENTS= ^
 -syslog logger [] ^
 -syslog syslog_error_logger false ^
 -kernel prevent_overlapping_partitions false ^
--enable-feature maybe_expr ^
 !STARVAR!
 
 set ERLANG_SERVICE_ARGUMENTS=!ERLANG_SERVICE_ARGUMENTS:\=\\!

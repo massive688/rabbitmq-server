@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2024 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_web_stomp_handler).
@@ -10,7 +10,6 @@
 -behaviour(cowboy_sub_protocol).
 
 -include_lib("kernel/include/logger.hrl").
--include_lib("rabbit_common/include/logging.hrl").
 -include_lib("rabbitmq_stomp/include/rabbit_stomp.hrl").
 -include_lib("rabbitmq_stomp/include/rabbit_stomp_frame.hrl").
 -include_lib("amqp_client/include/amqp_client.hrl").
@@ -43,8 +42,7 @@
     peername,
     auth_hd,
     stats_timer,
-    connection,
-    should_use_fhc :: rabbit_types:option(boolean())
+    connection
 }).
 
 -define(APP, rabbitmq_web_stomp).
@@ -85,11 +83,6 @@ init(Req0, Opts) ->
     end,
     WsOpts0 = proplists:get_value(ws_opts, Opts, #{}),
     WsOpts  = maps:merge(#{compress => true}, WsOpts0),
-    ShouldUseFHC = application:get_env(?APP, use_file_handle_cache, true),
-    case ShouldUseFHC of
-      true  -> ?LOG_INFO("Web STOMP: file handle cache use is enabled");
-      false -> ?LOG_INFO("Web STOMP: file handle cache use is disabled")
-    end,
     {?MODULE, Req, #state{
         frame_type         = proplists:get_value(type, Opts, text),
         heartbeat_sup      = KeepaliveSup,
@@ -99,18 +92,10 @@ init(Req0, Opts) ->
         conserve_resources = false,
         socket             = SockInfo,
         peername           = PeerAddr,
-        auth_hd            = cowboy_req:header(<<"authorization">>, Req),
-        should_use_fhc     = ShouldUseFHC
+        auth_hd            = cowboy_req:header(<<"authorization">>, Req)
     }, WsOpts}.
 
-websocket_init(State = #state{should_use_fhc = ShouldUseFHC}) ->
-    case ShouldUseFHC of
-      true  ->
-        ok = file_handle_cache:obtain();
-      false -> ok;
-      undefined ->
-        ok = file_handle_cache:obtain()
-    end,
+websocket_init(State) ->
     process_flag(trap_exit, true),
     {ok, ProcessorState} = init_processor_state(State),
     {ok, rabbit_event:init_stats_timer(
@@ -127,7 +112,7 @@ close_connection(Pid, Reason) ->
 
 init_processor_state(#state{socket=Sock, peername=PeerAddr, auth_hd=AuthHd}) ->
     Self = self(),
-    SendFun = fun (_Sync, Data) ->
+    SendFun = fun(Data) ->
                       Self ! {send, Data},
                       ok
               end,
@@ -331,15 +316,8 @@ maybe_block(State, _) ->
 stop(State) ->
     stop(State, 1000, "STOMP died").
 
-stop(State = #state{proc_state = ProcState, should_use_fhc = ShouldUseFHC}, CloseCode, Error0) ->
+stop(State = #state{proc_state = ProcState}, CloseCode, Error0) ->
     maybe_emit_stats(State),
-    case ShouldUseFHC of
-      true  ->
-        ok = file_handle_cache:release();
-      false -> ok;
-      undefined ->
-        ok = file_handle_cache:release()
-    end,
     _ = rabbit_stomp_processor:flush_and_die(ProcState),
     Error1 = rabbit_data_coercion:to_binary(Error0),
     {[{close, CloseCode, Error1}], State}.

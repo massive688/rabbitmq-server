@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2016-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2024 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 
 -module(direct_exchange_routing_v2_SUITE).
 
@@ -61,14 +61,21 @@ end_per_suite(Config) ->
     rabbit_ct_helpers:run_teardown_steps(Config).
 
 init_per_group(Group = cluster_size_1, Config0) ->
-    Config = rabbit_ct_helpers:set_config(Config0, {rmq_nodes_count, 1}),
+    Config = rabbit_ct_helpers:set_config(Config0, [{rmq_nodes_count, 1},
+                                                    {metadata_store, mnesia}]),
     start_broker(Group, Config);
 init_per_group(Group = cluster_size_2, Config0) ->
-    Config = rabbit_ct_helpers:set_config(Config0, {rmq_nodes_count, 2}),
+    Config = rabbit_ct_helpers:set_config(Config0, [{rmq_nodes_count, 2},
+                                                    {metadata_store, mnesia}]),
+    start_broker(Group, Config);
+init_per_group(Group = cluster_size_3, Config0) ->
+    Config = rabbit_ct_helpers:set_config(Config0, [{rmq_nodes_count, 3},
+                                                    {metadata_store, mnesia}]),
     start_broker(Group, Config);
 init_per_group(Group = unclustered_cluster_size_2, Config0) ->
     Config = rabbit_ct_helpers:set_config(Config0, [{rmq_nodes_count, 2},
-                                                    {rmq_nodes_clustered, false}]),
+                                                    {rmq_nodes_clustered, false},
+                                                    {metadata_store, mnesia}]),
     start_broker(Group, Config).
 
 start_broker(Group, Config0) ->
@@ -304,8 +311,8 @@ route_exchange_to_exchange(Config) ->
     bind_queue(Ch, Q2, FanoutX, <<"ignored">>),
 
     publish(Ch, DirectX, RKey),
-    quorum_queue_utils:wait_for_messages(Config, [[Q1, <<"1">>, <<"1">>, <<"0">>]]),
-    quorum_queue_utils:wait_for_messages(Config, [[Q2, <<"1">>, <<"1">>, <<"0">>]]),
+    queue_utils:wait_for_messages(Config, [[Q1, <<"1">>, <<"1">>, <<"0">>]]),
+    queue_utils:wait_for_messages(Config, [[Q2, <<"1">>, <<"1">>, <<"0">>]]),
     ?assertEqual(1, table_size(Config, ?INDEX_TABLE_NAME)),
 
     %% cleanup

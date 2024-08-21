@@ -2,11 +2,11 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2021-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2024 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 %% @author The RabbitMQ team
-%% @copyright 2023 VMware, Inc. or its affiliates.
+%% @copyright 2007-2024 Broadcom. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 %% @doc
 %% The feature flag controller is responsible for synchronization and managing
@@ -49,7 +49,8 @@
          running_nodes/0,
          collect_inventory_on_nodes/1, collect_inventory_on_nodes/2,
          mark_as_enabled_on_nodes/4,
-         wait_for_task_and_stop/0]).
+         wait_for_task_and_stop/0,
+         is_running/0]).
 
 %% gen_statem callbacks.
 -export([callback_mode/0,
@@ -79,7 +80,13 @@ start_link() ->
     gen_statem:start_link({local, ?LOCAL_NAME}, ?MODULE, none, []).
 
 wait_for_task_and_stop() ->
-    gen_statem:stop(?LOCAL_NAME).
+    case erlang:whereis(rabbit_sup) of
+        undefined -> gen_statem:stop(?LOCAL_NAME);
+        _         -> rabbit_sup:stop_child(?LOCAL_NAME)
+    end.
+
+is_running() ->
+    is_pid(erlang:whereis(?LOCAL_NAME)).
 
 is_supported(FeatureNames) ->
     is_supported(FeatureNames, ?TIMEOUT).
@@ -176,6 +183,10 @@ callback_mode() ->
     state_functions.
 
 init(_Args) ->
+    ?LOG_DEBUG(
+       "Feature flags: controller standing by",
+       #{domain => ?RMQLOG_DOMAIN_FEAT_FLAGS}),
+    process_flag(trap_exit, true),
     {ok, standing_by, none}.
 
 standing_by(
@@ -295,6 +306,14 @@ terminate(_Reason, _State, _Data) ->
     ok.
 
 wait_for_in_flight_operations() ->
+    case global:whereis_name(?GLOBAL_NAME) of
+        Pid when Pid == self() ->
+            ok;
+        _ ->
+            wait_for_in_flight_operations0()
+    end.
+
+wait_for_in_flight_operations0() ->
     case register_globally() of
         yes ->
             %% We don't unregister so the controller holds the lock until it
@@ -1065,17 +1084,20 @@ post_enable(#{states_per_node := _}, FeatureName, Nodes, Enabled) ->
 
 -ifndef(TEST).
 all_nodes() ->
-    lists:usort([node() | rabbit_nodes:list_members()]).
+    lists:sort(rabbit_nodes:list_members()).
 
 running_nodes() ->
     lists:usort([node() | rabbit_nodes:list_running()]).
 -else.
 all_nodes() ->
-    RemoteNodes = case rabbit_feature_flags:get_overriden_nodes() of
-                      undefined -> rabbit_nodes:list_members();
-                      Nodes     -> Nodes
-                  end,
-    lists:usort([node() | RemoteNodes]).
+    AllNodes = case rabbit_feature_flags:get_overriden_nodes() of
+                   undefined ->
+                       rabbit_nodes:list_members();
+                   Nodes ->
+                       ?assert(lists:member(node(), Nodes)),
+                       Nodes
+               end,
+    lists:sort(AllNodes).
 
 running_nodes() ->
     RemoteNodes = case rabbit_feature_flags:get_overriden_running_nodes() of
@@ -1106,6 +1128,8 @@ collect_inventory_on_nodes(Nodes, Timeout) ->
     Rets = inventory_rpcs(Nodes, Timeout),
     maps:fold(
       fun
+          (_Node, init_required, {ok, Inventory}) ->
+            {ok, Inventory};
           (Node,
            #{feature_flags := FeatureFlags1,
              applications := ScannedApps,
@@ -1130,12 +1154,20 @@ collect_inventory_on_nodes(Nodes, Timeout) ->
       end, {ok, Inventory0}, Rets).
 
 inventory_rpcs(Nodes, Timeout) ->
-    %% We must use `rabbit_ff_registry_wrapper' if it is available to avoid
-    %% any deadlock with the Code server. If it is unavailable, we fall back
-    %% to `rabbit_ff_registry'.
+    %% In the past, the feature flag registry in `rabbit_ff_registry' was
+    %% implemented with a module which was dynamically regenerated and
+    %% reloaded. To avoid deadlocks with the Code server we need to first call
+    %% into `rabbit_ff_registry_wrapper' if it is available. If it is
+    %% unavailable, we fall back to `rabbit_ff_registry'.
     %%
     %% See commit aacfa1978e24bcacd8de7d06a7c3c5d9d8bd098e and pull request
     %% #8155.
+    %%
+    %% In the long run, when compatibility with nodes that use module creation
+    %% for `rabbit_ff_registry' is no longer required, this block can be
+    %% replaced with a call of:
+    %%
+    %%     rpc_calls(Nodes, rabbit_ff_registry, inventory, []).
     Rets0 = rpc_calls(
               Nodes,
               rabbit_ff_registry_wrapper, inventory, [], Timeout),
@@ -1270,20 +1302,29 @@ list_feature_flags_enabled_somewhere(
       FeatureName :: rabbit_feature_flags:feature_name().
 
 list_deprecated_features_that_cant_be_denied(
-  #{states_per_node := StatesPerNode}) ->
+  #{feature_flags := FeatureFlags,
+    states_per_node := StatesPerNode}) ->
     ThisNode = node(),
     States = maps:get(ThisNode, StatesPerNode),
 
     maps:fold(
       fun
           (FeatureName, true, Acc) ->
-              #{ThisNode := IsUsed} = run_callback(
-                                        [ThisNode], FeatureName,
-                                        is_feature_used, #{}, infinity),
-              case IsUsed of
-                  true   -> [FeatureName | Acc];
-                  false  -> Acc;
-                  _Error -> Acc
+              FeatureProps = maps:get(FeatureName, FeatureFlags),
+              Stability = rabbit_feature_flags:get_stability(FeatureProps),
+              case Stability of
+                  required ->
+                      Acc;
+                  _ ->
+                      #{ThisNode := IsUsed} = run_callback(
+                                                [ThisNode], FeatureName,
+                                                is_feature_used, #{},
+                                                infinity),
+                      case IsUsed of
+                          true   -> [FeatureName | Acc];
+                          false  -> Acc;
+                          _Error -> [FeatureName | Acc]
+                      end
               end;
           (_FeatureName, false, Acc) ->
               Acc
@@ -1349,32 +1390,9 @@ this_node_first(Nodes) ->
       Ret :: term() | {error, term()}.
 
 rpc_call(Node, Module, Function, Args, Timeout) ->
-    SleepBetweenRetries = 5000,
-    T0 = erlang:monotonic_time(),
     try
         erpc:call(Node, Module, Function, Args, Timeout)
     catch
-        %% In case of `noconnection' with `Timeout'=infinity, we don't retry
-        %% at all. This is because the infinity "timeout" is used to run
-        %% callbacks on remote node and they can last an indefinite amount of
-        %% time, for instance, if there is a lot of data to migrate.
-        error:{erpc, noconnection} = Reason
-          when is_integer(Timeout) andalso Timeout > SleepBetweenRetries ->
-            ?LOG_WARNING(
-               "Feature flags: no connection to node `~ts`; "
-               "retrying in ~b milliseconds",
-               [Node, SleepBetweenRetries],
-               #{domain => ?RMQLOG_DOMAIN_FEAT_FLAGS}),
-            timer:sleep(SleepBetweenRetries),
-            T1 = erlang:monotonic_time(),
-            TDiff = erlang:convert_time_unit(T1 - T0, native, millisecond),
-            Remaining = Timeout - TDiff,
-            Timeout1 = erlang:max(Remaining, 0),
-            case Timeout1 of
-                0 -> {error, Reason};
-                _ -> rpc_call(Node, Module, Function, Args, Timeout1)
-            end;
-
         Class:Reason:Stacktrace ->
             Message0 = erl_error:format_exception(Class, Reason, Stacktrace),
             Message1 = lists:flatten(Message0),

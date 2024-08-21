@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2024 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_types).
@@ -11,7 +11,7 @@
 
 -export_type([
               %% deprecated
-              maybe/1,
+              'maybe'/1,
               option/1,
               info/0, infos/0, info_key/0, info_keys/0,
               message/0, msg_id/0, basic_message/0,
@@ -35,10 +35,12 @@
 
 -type(option(T) :: T | 'none' | 'undefined').
 %% Deprecated, 'maybe' is a keyword in modern Erlang
--type(maybe(T) :: T | 'none').
+-type('maybe'(T) :: T | 'none').
 -type(timestamp() :: {non_neg_integer(), non_neg_integer(), non_neg_integer()}).
 
 -type(vhost() :: binary()).
+%% An arbitrary binary tag used to distinguish between different consumers
+%% set up by the same process.
 -type(ctag() :: binary()).
 
 %% TODO: make this more precise by tying specific class_ids to
